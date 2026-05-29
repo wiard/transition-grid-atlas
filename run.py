@@ -30,6 +30,7 @@ from engine import run_transport_simulation
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
 from explorer.phase_map import build_phase_matrix, save_phase_map_plot
 from explorer.recursive_hunter import run_recursive_hunter
+from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
 from validation.monte_carlo import summarise_samples
 
@@ -38,6 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 ATLAS_RESULTS_DIR = PROJECT_ROOT / "atlas" / "results"
 ATLAS_PLOTS_DIR = PROJECT_ROOT / "atlas" / "plots"
 ATLAS_REPORTS_DIR = PROJECT_ROOT / "atlas" / "reports"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 MASTER_RESULTS_PATH = ATLAS_RESULTS_DIR / "master_results.csv"
 LATEST_REPORT_PATH = ATLAS_REPORTS_DIR / "latest_report.md"
 
@@ -51,6 +53,7 @@ def ensure_output_dirs() -> None:
     ATLAS_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     ATLAS_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     ATLAS_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def timestamp_token() -> str:
@@ -335,6 +338,42 @@ def print_single_summary(result: dict[str, Any]) -> None:
     print(f"status: {result['status']}")
 
 
+def build_inverse_report_lines(analysis: dict[str, Any]) -> list[str]:
+    summary = analysis["summary"]
+    lines = [
+        "## Inverse transition summary",
+        "",
+        f"- timestamp_utc: {datetime.now(UTC).isoformat()}",
+        "- mode: inverse",
+        f"- generated_paths: {len(analysis['pairs'])}",
+        f"- path_axis: {analysis['path_axis']}",
+        f"- slice_keys: {list(analysis['slice_keys'])}",
+        f"- dominance_threshold: {summary['dominance_threshold']:.3f}",
+        f"- annihilation_threshold: {summary['annihilation_threshold']:.3f}",
+        f"- symmetrical_paths: {summary['symmetrical_paths']}",
+        f"- annihilated_paths: {summary['annihilated_paths']}",
+        f"- dominant_paths: {summary['dominant_paths']}",
+        f"- dominant_direction: {summary['dominant_direction']}",
+        f"- average_annihilation_score: {summary['average_annihilation_score']:.6f}",
+        f"- inverse_csv: {analysis['csv_output_path']}",
+        f"- inverse_plot: {analysis['plot_output_path']}",
+        "",
+        "## Emergent regularities",
+        "",
+    ]
+
+    reported_laws = summary["reported_laws"]
+    if not reported_laws:
+        lines.append("No directional regularities exceeded the configured dominance threshold.")
+        return lines
+
+    for index, law in enumerate(reported_laws[:10], start=1):
+        lines.append(
+            f"{index}. {law['summary']}. forward_path={law['forward_path']}. inverse_path={law['inverse_path']}."
+        )
+    return lines
+
+
 def run_single_mode(config: dict[str, Any]) -> int:
     result = run_transport_simulation(config=config)
     append_master_results([flatten_result(result, mode="single")])
@@ -574,6 +613,33 @@ def run_audit_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_inverse_mode(config: dict[str, Any]) -> int:
+    ensure_output_dirs()
+    csv_path = OUTPUTS_DIR / "inverse_analysis.csv"
+    plot_path = OUTPUTS_DIR / "inverse_transition_map.png"
+    analysis = run_inverse_transition_analysis(
+        config=config,
+        csv_output_path=csv_path,
+        plot_output_path=plot_path,
+    )
+
+    write_latest_report(
+        title="Latest Transition Grid Atlas report",
+        lines=build_inverse_report_lines(analysis),
+    )
+
+    summary = analysis["summary"]
+    print(f"generated paths: {len(analysis['pairs'])}")
+    print(f"symmetrical paths: {summary['symmetrical_paths']}")
+    print(f"annihilated paths: {summary['annihilated_paths']}")
+    print(f"dominant paths: {summary['dominant_paths']}")
+    print(f"dominant direction: {summary['dominant_direction']}")
+    print(f"average annihilation score: {summary['average_annihilation_score']:.6f}")
+    print(f"inverse csv: {csv_path}")
+    print(f"inverse plot: {plot_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -591,6 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("sweep", help="Run deterministic parameter sweep")
     subparsers.add_parser("hunter", help="Run recursive search for diffusive candidates")
     subparsers.add_parser("audit", help="Audit ledger evidence under strict modern thresholds")
+    subparsers.add_parser("inverse", help="Run inverse transition symmetry analysis")
     return parser
 
 
@@ -610,6 +677,8 @@ def main() -> int:
         return run_hunter_mode(config)
     if args.command == "audit":
         return run_audit_mode(config)
+    if args.command == "inverse":
+        return run_inverse_mode(config)
     parser.error(f"unknown command: {args.command}")
     return 2
 

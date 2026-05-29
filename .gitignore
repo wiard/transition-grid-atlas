@@ -15,8 +15,11 @@ atlas/results/*.npy
 atlas/results/*.npz
 atlas/plots/*.png
 atlas/reports/*.md
+outputs/*.csv
+outputs/*.png
 
 # Keep output directories in git
 !atlas/results/.gitkeep
 !atlas/plots/.gitkeep
 !atlas/reports/.gitkeep
+!outputs/.gitkeep

@@ -124,6 +124,22 @@ It saves:
 - candidate plot
 - a fresh atlas report
 
+### 5. Inverse transition analysis
+
+```bash
+python run.py inverse
+```
+
+This experiment treats each ordered sweep slice as a transition path, creates
+its exact inverse path, and compares the two through symmetry analysis,
+directional dominance, path selection, and emergent regularities.
+
+It saves:
+
+- `outputs/inverse_analysis.csv`
+- `outputs/inverse_transition_map.png`
+- a fresh atlas report
+
 ## Status labels
 
 Each run is classified into exactly one of these categories:
@@ -184,6 +200,8 @@ was actually run.
 ### Reports
 
 - `atlas/reports/latest_report.md`
+- `outputs/inverse_analysis.csv`
+- `outputs/inverse_transition_map.png`
 
 ## Reproducibility notes
 

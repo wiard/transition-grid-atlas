@@ -54,6 +54,12 @@ hunter:
     eta: 1.80
     gamma: 0.30
 
+inverse_analysis:
+  path_axis: W
+  slice_keys: [bias, eta, gamma]
+  dominance_threshold: 0.25
+  annihilation_threshold: 0.90
+
 audit:
   diffusive_alpha_target: 0.5
   diffusive_alpha_tolerance: 0.035

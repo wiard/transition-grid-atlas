@@ -5,6 +5,12 @@ import unittest
 from engine import run_transport_simulation
 from engine.observables import classify_transport_regime
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
+from inverse_transition_layer import (
+    build_inverse_pairs,
+    extract_emergent_laws,
+    generate_inverse_path,
+    generate_transition_paths,
+)
 from validation.statistics import two_window_scaling_metrics
 
 import numpy as np
@@ -54,6 +60,36 @@ def build_small_config():
             "search_center": {"W": 1.0, "bias": 0.05, "eta": 0.3, "gamma": 0.0},
             "search_span": {"W": 0.5, "bias": 0.05, "eta": 0.3, "gamma": 0.0},
         },
+        "inverse_analysis": {
+            "path_axis": "W",
+            "slice_keys": ["bias", "eta", "gamma"],
+            "dominance_threshold": 0.25,
+            "annihilation_threshold": 0.90,
+        },
+    }
+
+
+def build_inverse_result(
+    *,
+    W: float,
+    bias: float,
+    eta: float,
+    gamma: float,
+    alpha: float,
+    r2: float,
+    alpha_window_shift: float,
+    scaling_window_stable: bool,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "parameters": {"W": W, "bias": bias, "eta": eta, "gamma": gamma, "seed": 7},
+        "alpha": alpha,
+        "r2": r2,
+        "alpha_window_shift": alpha_window_shift,
+        "scaling_window_stable": scaling_window_stable,
+        "unitarity_error": 1.0e-15,
+        "hermitian_error": 0.0,
+        "status": status,
     }
 
 
@@ -135,6 +171,155 @@ class TransitionGridAtlasTests(unittest.TestCase):
         )
         self.assertEqual(len(zones), 1)
         self.assertEqual(zones[0]["status"], "PHASE_BOUNDARY_ZONE")
+
+    def test_generate_inverse_path_reverses_exact_order(self):
+        path = ["A", "B", "C", "D"]
+        self.assertEqual(generate_inverse_path(path), ["D", "C", "B", "A"])
+
+    def test_generate_transition_paths_groups_fixed_slices(self):
+        results = [
+            build_inverse_result(
+                W=1.0,
+                bias=0.0,
+                eta=0.2,
+                gamma=0.0,
+                alpha=0.2,
+                r2=0.92,
+                alpha_window_shift=0.10,
+                scaling_window_stable=True,
+                status="WEAK_FIT",
+            ),
+            build_inverse_result(
+                W=0.0,
+                bias=0.0,
+                eta=0.2,
+                gamma=0.0,
+                alpha=0.1,
+                r2=0.91,
+                alpha_window_shift=0.20,
+                scaling_window_stable=False,
+                status="WEAK_FIT",
+            ),
+            build_inverse_result(
+                W=0.0,
+                bias=0.0,
+                eta=0.4,
+                gamma=0.0,
+                alpha=0.8,
+                r2=0.98,
+                alpha_window_shift=0.01,
+                scaling_window_stable=True,
+                status="VALID_BALLISTIC",
+            ),
+            build_inverse_result(
+                W=1.0,
+                bias=0.0,
+                eta=0.4,
+                gamma=0.0,
+                alpha=0.9,
+                r2=0.99,
+                alpha_window_shift=0.01,
+                scaling_window_stable=True,
+                status="VALID_BALLISTIC",
+            ),
+        ]
+
+        paths = generate_transition_paths(results)
+        self.assertEqual(len(paths), 2)
+        self.assertEqual([node["parameters"]["W"] for node in paths[0]], [0.0, 1.0])
+        self.assertEqual([node["parameters"]["W"] for node in paths[1]], [0.0, 1.0])
+
+    def test_inverse_pairs_capture_directional_dominance(self):
+        results = [
+            build_inverse_result(
+                W=0.0,
+                bias=0.0,
+                eta=0.4,
+                gamma=0.0,
+                alpha=0.10,
+                r2=0.91,
+                alpha_window_shift=0.80,
+                scaling_window_stable=False,
+                status="WEAK_FIT",
+            ),
+            build_inverse_result(
+                W=1.0,
+                bias=0.0,
+                eta=0.4,
+                gamma=0.0,
+                alpha=0.45,
+                r2=0.95,
+                alpha_window_shift=0.10,
+                scaling_window_stable=True,
+                status="VALID_DIFFUSIVE_CANDIDATE",
+            ),
+            build_inverse_result(
+                W=2.0,
+                bias=0.0,
+                eta=0.4,
+                gamma=0.0,
+                alpha=0.85,
+                r2=0.99,
+                alpha_window_shift=0.01,
+                scaling_window_stable=True,
+                status="VALID_BALLISTIC",
+            ),
+        ]
+
+        pairs = build_inverse_pairs(results)
+        self.assertEqual(len(pairs), 1)
+        self.assertGreater(pairs[0].forward_score, pairs[0].inverse_score)
+        self.assertGreater(pairs[0].dominance, 0.0)
+        self.assertAlmostEqual(
+            pairs[0].annihilation_score,
+            1.0 - abs(pairs[0].forward_score - pairs[0].inverse_score),
+        )
+
+    def test_extract_emergent_laws_filters_by_threshold(self):
+        pairs = [
+            build_inverse_pairs(
+                [
+                    build_inverse_result(
+                        W=0.0,
+                        bias=0.0,
+                        eta=0.4,
+                        gamma=0.0,
+                        alpha=0.10,
+                        r2=0.91,
+                        alpha_window_shift=0.80,
+                        scaling_window_stable=False,
+                        status="WEAK_FIT",
+                    ),
+                    build_inverse_result(
+                        W=1.0,
+                        bias=0.0,
+                        eta=0.4,
+                        gamma=0.0,
+                        alpha=0.50,
+                        r2=0.97,
+                        alpha_window_shift=0.05,
+                        scaling_window_stable=True,
+                        status="VALID_DIFFUSIVE_CANDIDATE",
+                    ),
+                    build_inverse_result(
+                        W=2.0,
+                        bias=0.0,
+                        eta=0.4,
+                        gamma=0.0,
+                        alpha=0.90,
+                        r2=0.99,
+                        alpha_window_shift=0.01,
+                        scaling_window_stable=True,
+                        status="VALID_BALLISTIC",
+                    ),
+                ]
+            )[0]
+        ]
+
+        summary = extract_emergent_laws(pairs, dominance_threshold=0.25, annihilation_threshold=0.95)
+        self.assertEqual(summary["dominant_paths"], 1)
+        self.assertEqual(summary["dominant_direction"], "forward")
+        self.assertEqual(len(summary["reported_laws"]), 1)
 
 
 if __name__ == "__main__":

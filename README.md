@@ -124,6 +124,25 @@ It saves:
 - candidate plot
 - a fresh atlas report
 
+### 5. Inverse transition analysis
+
+```bash
+python run.py inverse
+```
+
+This experimental mode:
+
+- generates ordered sweep paths across the configured path axis
+- builds an exact inverse path for every forward path
+- compares forward score, inverse score, and annihilation score
+- reports only directional regularities that exceed the configured dominance threshold
+
+Outputs:
+
+- `outputs/inverse_analysis.csv`
+- `outputs/inverse_transition_map.png`
+- `atlas/reports/latest_report.md`
+
 ## Status labels
 
 Each run is classified into exactly one of these categories:
@@ -184,6 +203,8 @@ was actually run.
 ### Reports
 
 - `atlas/reports/latest_report.md`
+- `outputs/inverse_analysis.csv`
+- `outputs/inverse_transition_map.png`
 
 ## Reproducibility notes
 
