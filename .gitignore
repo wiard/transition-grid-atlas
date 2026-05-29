@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Generated atlas output
+atlas/results/*.csv
+atlas/results/*.json
+atlas/results/*.npy
+atlas/results/*.npz
+atlas/plots/*.png
+atlas/reports/*.md
+
+# Keep output directories in git
+!atlas/results/.gitkeep
+!atlas/plots/.gitkeep
+!atlas/reports/.gitkeep
