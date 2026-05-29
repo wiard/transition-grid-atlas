@@ -53,3 +53,13 @@ hunter:
     bias: 0.24
     eta: 1.80
     gamma: 0.30
+
+audit:
+  diffusive_alpha_target: 0.5
+  diffusive_alpha_tolerance: 0.035
+  min_r2: 0.95
+  max_unitarity_error: 1.0e-12
+  max_hermitian_error: 1.0e-12
+  required_gamma: 0.0
+  max_alpha_window_shift: 0.05
+  top_n: 20

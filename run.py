@@ -30,6 +30,7 @@ from engine import run_transport_simulation
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
 from explorer.phase_map import build_phase_matrix, save_phase_map_plot
 from explorer.recursive_hunter import run_recursive_hunter
+from validation.audit import build_audit_report
 from validation.monte_carlo import summarise_samples
 
 
@@ -567,6 +568,12 @@ def run_hunter_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_audit_mode(config: dict[str, Any]) -> int:
+    report = build_audit_report(config=config, project_root=PROJECT_ROOT)
+    print(report)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -583,6 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("sweep", help="Run deterministic parameter sweep")
     subparsers.add_parser("hunter", help="Run recursive search for diffusive candidates")
+    subparsers.add_parser("audit", help="Audit ledger evidence under strict modern thresholds")
     return parser
 
 
@@ -600,6 +608,8 @@ def main() -> int:
         return run_sweep_mode(config)
     if args.command == "hunter":
         return run_hunter_mode(config)
+    if args.command == "audit":
+        return run_audit_mode(config)
     parser.error(f"unknown command: {args.command}")
     return 2
 
