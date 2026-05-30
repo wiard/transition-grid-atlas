@@ -1,0 +1,6 @@
+lab:
+  theory_mode: lindblad
+  W: 3.2
+  gamma: 0.03
+  render:
+    animate: false

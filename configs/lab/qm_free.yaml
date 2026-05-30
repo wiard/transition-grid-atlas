@@ -1,0 +1,6 @@
+lab:
+  theory_mode: qm_free
+  W: 0.0
+  gamma: 0.0
+  render:
+    animate: false

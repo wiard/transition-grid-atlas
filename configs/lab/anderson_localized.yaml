@@ -1,0 +1,6 @@
+lab:
+  theory_mode: anderson
+  W: 3.2
+  gamma: 0.0
+  render:
+    animate: false

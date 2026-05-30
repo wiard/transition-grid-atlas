@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import datetime, UTC
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +27,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from engine import run_transport_simulation
+from engine import LAB_RESULTS_FIELDS, run_transport_simulation
+from engine.lab_modes import build_lab_config, run_lab_simulation
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
 from explorer.phase_map import build_phase_matrix, save_phase_map_plot
 from explorer.recursive_hunter import run_recursive_hunter
+from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
+from validation.kta_audit import summarize_kta_audit
 from validation.monte_carlo import summarise_samples
 
 
@@ -40,13 +44,35 @@ ATLAS_RESULTS_DIR = PROJECT_ROOT / "atlas" / "results"
 ATLAS_PLOTS_DIR = PROJECT_ROOT / "atlas" / "plots"
 ATLAS_REPORTS_DIR = PROJECT_ROOT / "atlas" / "reports"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+LAB_RESULTS_DIR = PROJECT_ROOT / "results"
+LAB_TRAJECTORIES_DIR = LAB_RESULTS_DIR / "trajectories"
+LAB_RENDERS_DIR = LAB_RESULTS_DIR / "renders"
+LAB_LEDGER_PATH = LAB_RESULTS_DIR / "master_results.csv"
 MASTER_RESULTS_PATH = ATLAS_RESULTS_DIR / "master_results.csv"
 LATEST_REPORT_PATH = ATLAS_REPORTS_DIR / "latest_report.md"
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    with config_path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    base_path = PROJECT_ROOT / "config.yaml"
+    with base_path.open("r", encoding="utf-8") as handle:
+        base_config = yaml.safe_load(handle)
+
+    resolved = config_path.expanduser().resolve()
+    if resolved == base_path.resolve():
+        return base_config
+
+    with resolved.open("r", encoding="utf-8") as handle:
+        override = yaml.safe_load(handle) or {}
+    return _deep_merge(base_config, override)
 
 
 def ensure_output_dirs() -> None:
@@ -54,10 +80,48 @@ def ensure_output_dirs() -> None:
     ATLAS_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     ATLAS_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_RENDERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def timestamp_token() -> str:
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def lab_run_id(theory_mode: str) -> str:
+    return f"{timestamp_token()}_{theory_mode}"
+
+
+def append_lab_results(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ensure_output_dirs()
+    file_exists = LAB_LEDGER_PATH.exists()
+    with LAB_LEDGER_PATH.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LAB_RESULTS_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in LAB_RESULTS_FIELDS})
+
+
+def artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_lab_artifact_path(run_id: str | None, artifact_path: str | None) -> Path:
+    if run_id and artifact_path:
+        raise ValueError("Use either --run-id or --artifact-path, not both")
+    if artifact_path:
+        return Path(artifact_path).expanduser().resolve()
+    if run_id:
+        return (LAB_TRAJECTORIES_DIR / f"run_{run_id}.npz").resolve()
+    raise ValueError("Either --run-id or --artifact-path is required")
 
 
 def flatten_result(result: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -374,6 +438,116 @@ def build_inverse_report_lines(analysis: dict[str, Any]) -> list[str]:
     return lines
 
 
+def build_lab_report_lines(result: dict[str, Any], render_path: Path | None = None) -> list[str]:
+    lab_cfg = result["config"]
+    lines = [
+        "## Experimental Quantum & RTT Lab summary",
+        "",
+        f"- timestamp_utc: {datetime.now(UTC).isoformat()}",
+        f"- run_id: {result['run_id']}",
+        f"- theory_mode: {lab_cfg.theory_mode}",
+        f"- grid_size: {lab_cfg.grid_size}",
+        f"- time_horizon_steps: {result['summary_row']['T']}",
+        f"- dt: {lab_cfg.dt}",
+        f"- W: {result['summary_row']['W']}",
+        f"- gamma: {result['summary_row']['gamma']}",
+        f"- eta: {lab_cfg.eta}",
+        f"- x0: {lab_cfg.x0}",
+        f"- sigma: {lab_cfg.sigma}",
+        f"- k0: {lab_cfg.k0}",
+        f"- alpha_late: {result['alpha_late']:.6f}",
+        f"- trace_error: {result['trace_error']:.6e}",
+        f"- ipr_final: {result['summary_row']['ipr_final']:.6f}",
+        f"- edge_hit: {result['edge_hit']}",
+        f"- falldown: {result['falldown']}",
+        f"- unitarity_error: {result['unitarity_error']:.6e}",
+        f"- hermitian_error: {result['hermitian_error']:.6e}",
+        f"- trajectory_artifact: {result['artifact_path']}",
+        f"- trajectory_artifact_hash: {result['artifact_hash']}",
+        f"- config_hash: {result['config_hash']}",
+    ]
+    if render_path is not None:
+        lines.append(f"- render_artifact: {render_path}")
+    return lines
+
+
+def run_lab_mode(
+    config: dict[str, Any],
+    *,
+    mode: str | None = None,
+    gamma: float | None = None,
+    render: bool = False,
+) -> int:
+    ensure_output_dirs()
+    lab_cfg = build_lab_config(config, mode_override=mode, gamma_override=gamma)
+    run_id = lab_run_id(lab_cfg.theory_mode)
+    result = run_lab_simulation(
+        config=config,
+        run_id=run_id,
+        trajectories_dir=LAB_TRAJECTORIES_DIR,
+        lab_config=lab_cfg,
+    )
+
+    audit_summary = summarize_kta_audit(
+        probability_frames=result["probability_frames"],
+        times=result["times"],
+        trace_series=result["trace_series"],
+        x0=lab_cfg.x0,
+        config=lab_cfg,
+        coherence_norm_final=result["summary_row"]["coherence_norm_final"],
+    )
+    result["trace_error"] = audit_summary["trace_error"]
+    result["alpha_late"] = audit_summary["alpha_late"]
+    result["edge_hit"] = audit_summary["edge_hit"]
+    result["falldown"] = audit_summary["falldown_candidate"]
+    result["summary_row"]["trace_error"] = audit_summary["trace_error"]
+    result["summary_row"]["ipr_final"] = audit_summary["ipr_final"]
+    result["summary_row"]["alpha_late"] = audit_summary["alpha_late"]
+    result["summary_row"]["r2_late"] = audit_summary["r2_late"]
+    result["summary_row"]["edge_hit"] = audit_summary["edge_hit"]
+    result["summary_row"]["falldown_candidate"] = audit_summary["falldown_candidate"]
+    result["summary_row"]["falldown_score"] = audit_summary["falldown_score"]
+    result["summary_row"]["frame_corr_late"] = audit_summary["frame_corr_late"]
+    result["summary_row"]["x_var_drift_late"] = audit_summary["x_var_drift_late"]
+    result["summary_row"]["coherence_norm_final"] = audit_summary["coherence_norm_final"]
+    result["summary_row"]["zeno_indicator"] = audit_summary["zeno_indicator"]
+    result["summary_row"]["artifact_hash"] = artifact_sha256(result["artifact_path"])
+    result["artifact_hash"] = result["summary_row"]["artifact_hash"]
+    append_lab_results([result["summary_row"]])
+
+    render_path = None
+    should_render = bool(render or lab_cfg.render_animate)
+    if should_render:
+        render_path = LAB_RENDERS_DIR / f"{run_id}.mp4"
+        render_probability_animation(artifact_path=result["artifact_path"], output_path=render_path, fps=lab_cfg.render_fps)
+
+    report_lines = build_lab_report_lines(result, render_path=render_path)
+    write_latest_report("Latest Transition Grid Atlas report", report_lines)
+
+    print(f"run_id: {run_id}")
+    print(f"theory_mode: {lab_cfg.theory_mode}")
+    print(f"trajectory_artifact: {result['artifact_path']}")
+    print(f"artifact_hash: {result['artifact_hash']}")
+    print(f"trace_error: {result['trace_error']:.6e}")
+    print(f"ipr_final: {result['summary_row']['ipr_final']:.6f}")
+    print(f"alpha_late: {result['alpha_late']:.6f}")
+    print(f"edge_hit: {result['edge_hit']}")
+    print(f"falldown: {result['falldown']}")
+    print(f"config_hash: {result['config_hash']}")
+    if render_path is not None:
+        print(f"render_artifact: {render_path}")
+    return 0
+
+
+def run_animate_mode(*, trajectory: str, output_path: str) -> int:
+    ensure_output_dirs()
+    artifact = Path(trajectory).expanduser().resolve()
+    output = Path(output_path).expanduser().resolve()
+    render_probability_animation(artifact_path=artifact, output_path=output, fps=30)
+    print(f"render_artifact: {output}")
+    return 0
+
+
 def run_single_mode(config: dict[str, Any]) -> int:
     result = run_transport_simulation(config=config)
     append_master_results([flatten_result(result, mode="single")])
@@ -658,6 +832,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("hunter", help="Run recursive search for diffusive candidates")
     subparsers.add_parser("audit", help="Audit ledger evidence under strict modern thresholds")
     subparsers.add_parser("inverse", help="Run inverse transition symmetry analysis")
+    lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
+    lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
+    lab_parser.add_argument("--gamma", type=float, default=None, help="Override lab gamma for this run")
+    lab_parser.add_argument("--render", action="store_true", help="Render an animation artifact after the lab run")
+
+    animate_parser = subparsers.add_parser("animate", help="Render a GIF or MP4 from a saved lab trajectory artifact")
+    animate_parser.add_argument("--trajectory", required=True, help="Path to a saved .npz trajectory artifact")
+    animate_parser.add_argument("--out", required=True, help="Output GIF or MP4 path")
     return parser
 
 
@@ -679,6 +861,10 @@ def main() -> int:
         return run_audit_mode(config)
     if args.command == "inverse":
         return run_inverse_mode(config)
+    if args.command == "lab":
+        return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
+    if args.command == "animate":
+        return run_animate_mode(trajectory=args.trajectory, output_path=args.out)
     parser.error(f"unknown command: {args.command}")
     return 2
 

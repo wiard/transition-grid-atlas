@@ -6,6 +6,14 @@ Transition Grid Atlas is a reproducible scientific software instrument for
 investigating emergent transport laws in tight-binding and feedback-coupled
 grid systems.
 
+It also contains an **Experimental Quantum & RTT Lab** for side-by-side
+simulation of:
+
+- standard unitary quantum transport
+- Anderson localization
+- Lindblad dephasing
+- reflexive transition theory (RTT)
+
 It is **not** a proof of a new law of physics.
 
 Its job is more modest and more rigorous:
@@ -143,6 +151,43 @@ Outputs:
 - `outputs/inverse_transition_map.png`
 - `atlas/reports/latest_report.md`
 
+### 6. Experimental Quantum & RTT Lab
+
+```bash
+python run.py lab
+python run.py lab --mode qm_free
+python run.py lab --mode anderson
+python run.py lab --mode lindblad --gamma 0.03
+python run.py lab --mode rtt
+python run.py lab --config configs/lab/lindblad_gamma_sweep.yaml
+```
+
+This mode launches a coherent Gaussian wave packet and evolves it under the
+configured `lab.theory_mode`.
+
+Trajectory data is kept out of the compact CSV ledger and written as a binary
+artifact:
+
+- `results/trajectories/run_<run_id>.npz`
+- `results/master_results.csv`
+
+To render the saved probability frames afterwards:
+
+```bash
+python run.py animate \
+  --trajectory results/trajectories/run_<run_id>.npz \
+  --out results/renders/<run_id>.gif
+```
+
+The renderer is a pure IO consumer and writes:
+
+- `results/renders/<run_id>.gif`
+- `results/renders/<run_id>.mp4`
+
+The lab operationalises RTT cautiously. It does not prove RTT. It measures
+transport blockage, localisation, edge reflection, dephasing-assisted motion,
+and candidate falldown behaviour in a controlled quantum-walk model.
+
 ## Status labels
 
 Each run is classified into exactly one of these categories:
@@ -206,6 +251,19 @@ was actually run.
 - `outputs/inverse_analysis.csv`
 - `outputs/inverse_transition_map.png`
 
+### KTA artifacts
+
+- `results/master_results.csv`
+- `results/trajectories/run_*.npz`
+- `results/renders/*.gif`
+- `results/renders/*.mp4`
+
+### Experimental lab artifacts
+
+- `results/master_results.csv`
+- `results/trajectories/run_*.npz`
+- `renders/*.mp4`
+
 ## Reproducibility notes
 
 - All array-valued physical computations use explicit double precision.
@@ -213,6 +271,8 @@ was actually run.
 - No plot is generated from a run that has not already passed through the
   validation layer.
 - Monte Carlo and hunter modes save the actual sampled parameters used.
+- Experimental lab runs store full trajectory data in `.npz` artifacts instead
+  of the CSV ledger.
 
 ## Minimal verification
 
