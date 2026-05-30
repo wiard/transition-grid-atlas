@@ -40,6 +40,7 @@ from hardware.constraints import (
 )
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
+from hardware.motor_ensemble import run_transition_motor_ensemble_study
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -1110,6 +1111,31 @@ def run_transition_motor_audit_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_transition_motor_ensemble_mode(config: dict[str, Any]) -> int:
+    _, summary, csv_path, summary_path = run_transition_motor_ensemble_study(config)
+    print("Transition Motor Ensemble Study")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"success_rate = {summary.success_rate:.6f}")
+    print(f"mean_detector_success_gain = {summary.mean_detector_success_gain:.6f}")
+    print(f"median_detector_success_gain = {summary.median_detector_success_gain:.6f}")
+    print(f"mean_transport_gain = {summary.mean_transport_gain:.6f}")
+    print(f"mean_noise_action_reduction = {summary.mean_noise_action_reduction:.6f}")
+    print(f"mean_noise_leakage_reduction = {summary.mean_noise_leakage_reduction:.6f}")
+    print(f"mean_objective_gain = {summary.mean_objective_gain:.6f}")
+    print(f"mean_saturated_knobs = {summary.mean_saturated_knobs:.6f}")
+    print(f"mean_near_bound_knobs = {summary.mean_near_bound_knobs:.6f}")
+    print(f"mean_baseline_detector_success = {summary.mean_baseline_detector_success:.6f}")
+    print(f"mean_best_detector_success = {summary.mean_best_detector_success:.6f}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether transition-motor controls improve "
+        "detector-output success and reduce noise-action under sampled wafer disorder and phase-noise "
+        "profiles. It is hardware-native error suppression, not full QEC or experimental validation."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1180,6 +1206,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-motor YAML path; accepted after the subcommand for operator convenience",
     )
+    transition_motor_ensemble_parser = subparsers.add_parser(
+        "transition-motor-ensemble",
+        help="Run a synthetic ensemble validation for the transition motor",
+    )
+    transition_motor_ensemble_parser.add_argument(
+        "--config",
+        dest="transition_motor_ensemble_config",
+        default=None,
+        help="Optional transition-motor ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1209,6 +1245,7 @@ def main() -> int:
         or getattr(args, "transition_tune_config", None)
         or getattr(args, "transition_motor_config", None)
         or getattr(args, "transition_motor_audit_config", None)
+        or getattr(args, "transition_motor_ensemble_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1239,6 +1276,8 @@ def main() -> int:
         return run_transition_motor_mode(config, report_sensitivity=args.report_sensitivity)
     if args.command == "transition-motor-audit":
         return run_transition_motor_audit_mode(config)
+    if args.command == "transition-motor-ensemble":
+        return run_transition_motor_ensemble_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
