@@ -104,6 +104,34 @@ def parse_lab_config(config: dict[str, Any]) -> LabConfig:
     simulation_cfg = dict(config["simulation"])
     parameter_cfg = dict(config["parameters"])
     lab_cfg = dict(config.get("lab", {}))
+
+    if any(key in config for key in ("system", "wavepacket", "solver")):
+        system_cfg = dict(config.get("system", {}))
+        packet_cfg = dict(config.get("wavepacket", {}))
+        solver_cfg = dict(config.get("solver", {}))
+        audit_cfg = dict(config.get("audit", {}))
+        fit_window_late = list(audit_cfg.get("fit_window_late", []))
+        horizon = float(solver_cfg.get("T", simulation_cfg.get("t_max_steps", simulation_cfg.get("steps", 384))))
+        dt = float(solver_cfg.get("dt", simulation_cfg.get("dt", 0.25)))
+        steps = max(4, int(round(horizon / dt)) + 1) if dt > 0 else int(simulation_cfg.get("t_max_steps", simulation_cfg.get("steps", 384)))
+
+        lab_cfg = {
+            "theory_mode": system_cfg.get("mode", "qm_free"),
+            "grid_size": int(system_cfg.get("L", simulation_cfg.get("grid_size", 129))),
+            "time_horizon_steps": steps,
+            "dt": dt,
+            "W": float(system_cfg.get("disorder_strength", parameter_cfg.get("W", 0.0))),
+            "gamma": float(system_cfg.get("gamma", parameter_cfg.get("gamma", 0.0))),
+            "edge_width": int(audit_cfg.get("edge_margin", 4)),
+            "burn_in_fraction": float(fit_window_late[0]) if fit_window_late else 0.5,
+            "wave_packet": {
+                "x0": float(packet_cfg.get("x0", 64.0)),
+                "sigma": float(packet_cfg.get("sigma0", 4.0)),
+                "k0": float(packet_cfg.get("k0", 0.785)),
+            },
+            "render": {"animate": False, "fps": 30},
+        }
+
     wave_packet_cfg = dict(lab_cfg.get("wave_packet", {}))
     render_cfg = dict(lab_cfg.get("render", {}))
 
