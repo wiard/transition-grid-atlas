@@ -39,6 +39,7 @@ from hardware.constraints import (
     validate_wafer_config,
 )
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
+from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -1074,6 +1075,41 @@ def run_transition_motor_mode(
     return 0
 
 
+def run_transition_motor_audit_mode(config: dict[str, Any]) -> int:
+    motor_config, _ = transition_motor_config_from_dict(config)
+    audit = run_transition_motor_bound_audit(motor_config)
+
+    statuses = audit.bound_statuses
+    ablations = sorted(audit.ablations, key=lambda item: item.objective_loss_from_ablation, reverse=True)
+    efficiencies = sorted(audit.efficiencies, key=lambda item: item.gain_per_cost, reverse=True)
+    upper = [item.name for item in statuses if item.at_upper_bound]
+    lower = [item.name for item in statuses if item.at_lower_bound]
+    near = [item.name for item in statuses if item.near_bound]
+
+    print("Transition Motor Bound-Pressure Audit")
+    print(f"saturated_knobs = {sum(1 for item in statuses if item.at_lower_bound or item.at_upper_bound)}")
+    print(f"near_bound_knobs = {near}")
+    print(f"knobs_at_upper_bound = {upper}")
+    print(f"knobs_at_lower_bound = {lower}")
+    print(
+        "top_knobs_by_objective_loss = "
+        f"{[{'knob': item.knob, 'objective_loss_from_ablation': item.objective_loss_from_ablation} for item in ablations[:3]]}"
+    )
+    print(
+        "top_knobs_by_gain_per_cost = "
+        f"{[{'knob': item.knob, 'gain_per_cost': item.gain_per_cost} for item in efficiencies[:3]]}"
+    )
+    for item in audit.limit_sweep:
+        print(f"limit_scale_{item.scale:.2f}_objective_improvement = {item.objective_improvement:.6f}")
+    print(f"mean_best_objective = {audit.seed_summary['mean_best_objective']:.6f}")
+    print(f"std_best_objective = {audit.seed_summary['std_best_objective']:.6f}")
+    print(f"min_best_objective = {audit.seed_summary['min_best_objective']:.6f}")
+    print(f"max_best_objective = {audit.seed_summary['max_best_objective']:.6f}")
+    print(f"constraint_limited = {str(audit.constraint_limited).lower()}")
+    print(f"recommended_action = {audit.recommended_action}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1134,6 +1170,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write a sensitivity atlas CSV for the transition motor operating point",
     )
+    transition_motor_audit_parser = subparsers.add_parser(
+        "transition-motor-audit",
+        help="Audit transition motor bound pressure, ablations, limits and seed stability",
+    )
+    transition_motor_audit_parser.add_argument(
+        "--config",
+        dest="transition_motor_audit_config",
+        default=None,
+        help="Optional transition-motor YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1162,6 +1208,7 @@ def main() -> int:
         getattr(args, "hardware_config", None)
         or getattr(args, "transition_tune_config", None)
         or getattr(args, "transition_motor_config", None)
+        or getattr(args, "transition_motor_audit_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1190,6 +1237,8 @@ def main() -> int:
         return run_transition_tune_mode(config)
     if args.command == "transition-motor":
         return run_transition_motor_mode(config, report_sensitivity=args.report_sensitivity)
+    if args.command == "transition-motor-audit":
+        return run_transition_motor_audit_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
