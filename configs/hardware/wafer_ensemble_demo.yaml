@@ -1,0 +1,46 @@
+wafer_ensemble:
+  grid:
+    n_sites: 12
+    edges:
+      - [0, 1]
+      - [1, 2]
+      - [2, 3]
+      - [3, 4]
+      - [4, 5]
+      - [5, 6]
+      - [6, 7]
+      - [7, 8]
+      - [8, 9]
+      - [9, 10]
+      - [10, 11]
+    base_coupling: 1.0
+    input_index: 0
+    target_indices: [10, 11]
+
+  fabrication_disorder:
+    n_samples: 25
+    onsite_sigma: 0.08
+    correlation_length_sites: 2.0
+    seed: 123
+
+  phase_noise:
+    n_profiles_per_sample: 3
+    profile_sigma: 1.0
+    correlation_length_sites: 2.0
+    seed: 456
+
+  tuner:
+    max_relative_coupling_delta: 0.15
+    max_onsite_shift: 0.10
+    n_candidates: 150
+    seed: 42
+    time_min: 0.0
+    time_max: 20.0
+    n_time_samples: 100
+    transport_weight: 1.0
+    suppression_weight: 0.5
+    control_penalty_weight: 0.01
+
+  outputs:
+    csv_path: outputs/wafer_ensemble_error_suppression.csv
+    summary_path: outputs/wafer_ensemble_summary.json

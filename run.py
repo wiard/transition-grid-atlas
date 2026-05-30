@@ -50,6 +50,7 @@ from hardware.transition_tuner import (
     random_transition_search,
     transition_tuner_config_from_dict,
 )
+from hardware.wafer_ensemble import run_wafer_ensemble_study
 from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
@@ -961,6 +962,28 @@ def run_transition_tune_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_wafer_ensemble_mode(config: dict[str, Any]) -> int:
+    _, summary, csv_path, summary_path = run_wafer_ensemble_study(config)
+    print("Synthetic wafer ensemble study")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"success_rate = {summary.success_rate:.6f}")
+    print(f"mean_transport_gain = {summary.mean_transport_gain:.6f}")
+    print(f"mean_noise_overlap_reduction = {summary.mean_noise_overlap_reduction:.6f}")
+    print(f"mean_objective_gain = {summary.mean_objective_gain:.6f}")
+    print(f"mean_baseline_transport_efficiency = {summary.mean_baseline_transport_efficiency:.6f}")
+    print(f"mean_best_transport_efficiency = {summary.mean_best_transport_efficiency:.6f}")
+    print(f"mean_baseline_noise_overlap = {summary.mean_baseline_noise_overlap:.6f}")
+    print(f"mean_best_noise_overlap = {summary.mean_best_noise_overlap:.6f}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether transition-dynamics tuning remains beneficial "
+        "under sampled fabrication disorder and phase-noise profiles. It is a hardware-native "
+        "error-suppression study, not full QEC."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1006,6 +1029,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-tuner YAML path; accepted after the subcommand for operator convenience",
     )
+    wafer_ensemble_parser = subparsers.add_parser(
+        "wafer-ensemble",
+        help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
+    )
+    wafer_ensemble_parser.add_argument(
+        "--config",
+        dest="wafer_ensemble_config",
+        default=None,
+        help="Optional wafer-ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
     lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
     lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
     lab_parser.add_argument("--gamma", type=float, default=None, help="Override lab gamma for this run")
@@ -1023,6 +1056,7 @@ def main() -> int:
     config_path = Path(
         getattr(args, "hardware_config", None)
         or getattr(args, "transition_tune_config", None)
+        or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
     config = load_config(config_path)
@@ -1048,6 +1082,8 @@ def main() -> int:
         )
     if args.command == "transition-tune":
         return run_transition_tune_mode(config)
+    if args.command == "wafer-ensemble":
+        return run_wafer_ensemble_mode(config)
     if args.command == "lab":
         return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
     if args.command == "animate":
