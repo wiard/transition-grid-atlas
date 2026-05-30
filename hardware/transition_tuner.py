@@ -8,8 +8,8 @@ import numpy as np
 
 from hardware.subspaces import (
     diagonal_phase_noise,
-    information_subspace,
     noise_overlap_with_subspace,
+    transport_subspace_from_hamiltonian,
 )
 
 
@@ -193,26 +193,17 @@ def transport_efficiency(
     return float(np.clip(best_efficiency, 0.0, 1.0))
 
 
-def _dynamic_noise_overlap(
+def dynamic_noise_overlap(
     H: np.ndarray,
     noise_ops: list[np.ndarray],
     grid: FixedGrid,
-    times: np.ndarray,
 ) -> float:
-    U_info = information_subspace(grid.n_sites, grid.input_index, list(grid.target_indices))
-    eigvals, eigvecs = np.linalg.eigh(np.asarray(H, dtype=np.complex128))
-
-    overlaps = []
-    for time_value in np.asarray(times, dtype=np.float64):
-        phase = np.exp(-1j * eigvals * float(time_value))
-        propagator = eigvecs @ np.diag(phase) @ np.conjugate(eigvecs.T)
-        evolved_noise_ops = [
-            np.conjugate(propagator.T) @ np.asarray(noise_operator, dtype=np.complex128) @ propagator
-            for noise_operator in noise_ops
-        ]
-        overlaps.append(noise_overlap_with_subspace(evolved_noise_ops, U_info))
-
-    return float(np.mean(overlaps)) if overlaps else 0.0
+    transport_subspace = transport_subspace_from_hamiltonian(
+        np.asarray(H, dtype=np.complex128),
+        grid.input_index,
+        list(grid.target_indices),
+    )
+    return noise_overlap_with_subspace(noise_ops, transport_subspace)
 
 
 def _control_penalty(H: np.ndarray, grid: FixedGrid) -> float:
@@ -228,7 +219,7 @@ def evaluate_candidate(
 ) -> dict[str, float]:
     times = _time_grid(config)
     transport = transport_efficiency(H, grid.input_index, list(grid.target_indices), times)
-    overlap = _dynamic_noise_overlap(H, noise_ops, grid, times)
+    overlap = dynamic_noise_overlap(H, noise_ops, grid)
     suppression = float(np.clip(1.0 - overlap, 0.0, 1.0))
     penalty = _control_penalty(H, grid)
     objective = (

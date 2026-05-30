@@ -54,6 +54,49 @@ def information_subspace(
     return orthonormalize_columns(np.column_stack([input_mode, target_mode]))
 
 
+def transport_subspace_from_hamiltonian(
+    H: np.ndarray,
+    input_index: int,
+    target_indices: list[int],
+    *,
+    n_modes: int = 2,
+) -> np.ndarray:
+    """Return an H-dependent transport subspace.
+
+    The selected modes are the Hamiltonian eigenmodes with the largest combined
+    overlap with the input mode and target detector sector. This is distinct
+    from the fixed geometric input/target subspace.
+    """
+
+    operator = np.asarray(H, dtype=np.complex128)
+    if operator.ndim != 2 or operator.shape[0] != operator.shape[1]:
+        raise ValueError("H must be a square matrix")
+    n_sites = operator.shape[0]
+    if input_index < 0 or input_index >= n_sites:
+        raise ValueError("input_index out of range")
+    if not target_indices:
+        raise ValueError("target_indices must be non-empty")
+    if n_modes <= 0:
+        raise ValueError("n_modes must be positive")
+
+    target_set = sorted({int(index) for index in target_indices})
+    for index in target_set:
+        if index < 0 or index >= n_sites:
+            raise ValueError(f"target index out of range: {index}")
+
+    eigvals, eigvecs = np.linalg.eigh(operator)
+    del eigvals  # eigenvalues are not needed for the selection itself
+
+    scores = []
+    for mode_index in range(eigvecs.shape[1]):
+        vector = eigvecs[:, mode_index]
+        score = float(abs(vector[input_index]) ** 2 + np.sum(np.abs(vector[target_set]) ** 2))
+        scores.append((score, mode_index))
+
+    selected = [index for _, index in sorted(scores, reverse=True)[: min(n_modes, eigvecs.shape[1])]]
+    return orthonormalize_columns(eigvecs[:, selected])
+
+
 def projector_from_basis(U: np.ndarray) -> np.ndarray:
     basis = np.asarray(U, dtype=np.complex128)
     if basis.ndim != 2:

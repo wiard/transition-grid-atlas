@@ -9,10 +9,12 @@ from hardware.transition_tuner import (
     TransitionTunerConfig,
     apply_transition_controls,
     build_base_hamiltonian,
+    dynamic_noise_overlap,
     noise_operators_from_profiles,
     random_transition_search,
     transport_efficiency,
 )
+from hardware.subspaces import information_subspace, noise_overlap_with_subspace
 
 
 class TransitionTunerTests(unittest.TestCase):
@@ -87,3 +89,43 @@ class TransitionTunerTests(unittest.TestCase):
         self.assertGreaterEqual(result.best_transport_efficiency, 0.0)
         self.assertGreaterEqual(result.baseline_suppression_score, 0.0)
         self.assertGreaterEqual(result.best_suppression_score, 0.0)
+
+    def test_dynamic_noise_overlap_may_change_when_h_changes(self):
+        grid = self.build_grid()
+        H0 = build_base_hamiltonian(grid)
+        H1 = apply_transition_controls(
+            H0,
+            grid,
+            {(1, 2): 1.15, (3, 4): 0.87},
+            np.array([0.0, 0.05, -0.03, 0.02, -0.06, 0.01], dtype=np.float64),
+        )
+        noise_ops = self.build_noise_ops()
+        overlap0 = dynamic_noise_overlap(H0, noise_ops, grid)
+        overlap1 = dynamic_noise_overlap(H1, noise_ops, grid)
+        self.assertNotAlmostEqual(overlap0, overlap1)
+
+    def test_fixed_geometric_overlap_remains_invariant_even_when_h_changes(self):
+        grid = self.build_grid()
+        H0 = build_base_hamiltonian(grid)
+        H1 = apply_transition_controls(
+            H0,
+            grid,
+            {(0, 1): 1.1},
+            np.array([0.01, -0.01, 0.02, -0.02, 0.0, 0.0], dtype=np.float64),
+        )
+        del H1
+        noise_ops = self.build_noise_ops()
+        U_info = information_subspace(grid.n_sites, grid.input_index, list(grid.target_indices))
+        overlap0 = noise_overlap_with_subspace(noise_ops, U_info)
+        overlap1 = noise_overlap_with_subspace(noise_ops, U_info)
+        self.assertAlmostEqual(overlap0, overlap1)
+
+    def test_random_transition_search_does_not_mutate_noise_ops_or_grid(self):
+        grid = self.build_grid()
+        original_targets = list(grid.target_indices)
+        noise_ops = self.build_noise_ops()
+        frozen_noise_ops = [np.array(operator, copy=True) for operator in noise_ops]
+        random_transition_search(grid, noise_ops, self.build_config())
+        for before, after in zip(frozen_noise_ops, noise_ops):
+            self.assertTrue(np.array_equal(before, after))
+        self.assertEqual(grid.target_indices, original_targets)

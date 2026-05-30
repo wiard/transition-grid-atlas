@@ -939,6 +939,8 @@ def run_transition_tune_mode(config: dict[str, Any]) -> int:
     improvement = result.best_objective - result.baseline_objective
 
     print("Transition dynamics tuner")
+    print("subspace_definition = dynamic_transport_modes_from_H")
+    print("noise_overlap_control_dependent = true")
     print(f"fixed_grid_sites = {grid.n_sites}")
     print(f"fixed_grid_edges = {len(grid.edges)}")
     print(f"baseline_transport_efficiency = {result.baseline_transport_efficiency:.6f}")
