@@ -38,6 +38,15 @@ from hardware.constraints import (
     validate_gamma_range,
     validate_wafer_config,
 )
+from hardware.ensemble_statistics import (
+    compute_bootstrap_summary,
+    compute_bound_pressure_summary,
+    compute_tradeoff_summary,
+    compute_win_rates,
+    plot_ensemble_statistics,
+    read_ensemble_csv,
+    write_statistics_json,
+)
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
@@ -1136,6 +1145,65 @@ def run_transition_motor_ensemble_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_transition_motor_ensemble_stats_mode(
+    *,
+    csv_path: str,
+    out_json: str,
+    out_plot: str,
+) -> int:
+    rows = read_ensemble_csv(csv_path)
+    win_rates = compute_win_rates(rows)
+    bootstrap = compute_bootstrap_summary(
+        rows,
+        [
+            "detector_success_gain",
+            "noise_action_reduction",
+            "noise_leakage_reduction",
+            "objective_gain",
+        ],
+    )
+    bound_pressure = compute_bound_pressure_summary(rows)
+    tradeoffs = compute_tradeoff_summary(rows)
+    json_path = write_statistics_json(
+        out_json,
+        win_rates=win_rates,
+        bootstrap=bootstrap,
+        bound_pressure=bound_pressure,
+        tradeoffs=tradeoffs,
+    )
+    plot_path = plot_ensemble_statistics(rows, out_plot)
+
+    bootstrap_by_metric = {item.metric: item for item in bootstrap}
+    detector_boot = bootstrap_by_metric["detector_success_gain"]
+    noise_boot = bootstrap_by_metric["noise_action_reduction"]
+    leakage_boot = bootstrap_by_metric["noise_leakage_reduction"]
+
+    print("Transition Motor Ensemble Statistics")
+    print(f"n_samples = {win_rates.n_samples}")
+    print(f"detector_win_rate = {win_rates.detector_win_rate:.6f}")
+    print(f"noise_action_win_rate = {win_rates.noise_action_win_rate:.6f}")
+    print(f"leakage_win_rate = {win_rates.leakage_win_rate:.6f}")
+    print(f"objective_win_rate = {win_rates.objective_win_rate:.6f}")
+    print(f"detector_and_noise_win_rate = {win_rates.detector_and_noise_win_rate:.6f}")
+    print(f"all_core_metrics_win_rate = {win_rates.all_core_metrics_win_rate:.6f}")
+    print(f"bootstrap_detector_gain_mean = {detector_boot.mean:.6f}")
+    print(f"bootstrap_detector_gain_95ci = ({detector_boot.ci_low:.6f}, {detector_boot.ci_high:.6f})")
+    print(f"bootstrap_noise_action_reduction_mean = {noise_boot.mean:.6f}")
+    print(f"bootstrap_noise_action_reduction_95ci = ({noise_boot.ci_low:.6f}, {noise_boot.ci_high:.6f})")
+    print(f"bootstrap_leakage_reduction_mean = {leakage_boot.mean:.6f}")
+    print(f"bootstrap_leakage_reduction_95ci = ({leakage_boot.ci_low:.6f}, {leakage_boot.ci_high:.6f})")
+    print(f"mean_saturated_knobs = {bound_pressure.mean_saturated_knobs:.6f}")
+    print(f"detector_vs_noise_corr = {tradeoffs.detector_vs_noise_corr:.6f}")
+    print(f"stats_json_path = {json_path}")
+    print(f"stats_plot_path = {plot_path}")
+    print(
+        "interpretation = This statistical audit checks whether the synthetic ensemble improvement "
+        "is distributed across samples or dominated by outliers. It supports detector-output robustness "
+        "analysis, not experimental validation or full QEC."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1216,6 +1284,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-motor ensemble YAML path; accepted after the subcommand for operator convenience",
     )
+    transition_motor_ensemble_stats_parser = subparsers.add_parser(
+        "transition-motor-ensemble-stats",
+        help="Compute statistical audit outputs for a transition-motor ensemble CSV",
+    )
+    transition_motor_ensemble_stats_parser.add_argument("--csv", required=True, help="Input ensemble CSV path")
+    transition_motor_ensemble_stats_parser.add_argument("--out-json", required=True, help="Output statistics JSON path")
+    transition_motor_ensemble_stats_parser.add_argument("--out-plot", required=True, help="Output statistics plot path")
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1278,6 +1353,12 @@ def main() -> int:
         return run_transition_motor_audit_mode(config)
     if args.command == "transition-motor-ensemble":
         return run_transition_motor_ensemble_mode(config)
+    if args.command == "transition-motor-ensemble-stats":
+        return run_transition_motor_ensemble_stats_mode(
+            csv_path=args.csv,
+            out_json=args.out_json,
+            out_plot=args.out_plot,
+        )
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
