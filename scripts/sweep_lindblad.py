@@ -12,6 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -221,6 +222,10 @@ def plot_grid_heatmap(csv_path: Path, output_path: Path) -> Path:
         (float(row["W"]), float(row["gamma"])): float(row["ipr_final"])
         for row in rows
     }
+    edge_hit_map = {
+        (float(row["W"]), float(row["gamma"])): str(row["edge_hit"]).strip().lower() == "true"
+        for row in rows
+    }
 
     alpha_matrix = []
     ipr_matrix = []
@@ -234,6 +239,21 @@ def plot_grid_heatmap(csv_path: Path, output_path: Path) -> Path:
 
     alpha_matrix_np = np.asarray(alpha_matrix, dtype=float)
     ipr_matrix_np = np.asarray(ipr_matrix, dtype=float)
+    gamma_centers = np.asarray(GRID_GAMMA_VALUES, dtype=float)
+    disorder_centers = np.asarray(GRID_W_VALUES, dtype=float)
+
+    def coordinate_edges(centers: np.ndarray) -> np.ndarray:
+        edges = np.empty(len(centers) + 1, dtype=float)
+        edges[1:-1] = 0.5 * (centers[:-1] + centers[1:])
+        first_step = edges[1] - centers[0]
+        last_step = centers[-1] - edges[-2]
+        edges[0] = max(0.0, centers[0] - first_step)
+        edges[-1] = centers[-1] + last_step
+        return edges
+
+    gamma_edges = coordinate_edges(gamma_centers)
+    disorder_edges = coordinate_edges(disorder_centers)
+    grid_x, grid_y = np.meshgrid(gamma_centers, disorder_centers)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, (ax_alpha, ax_ipr) = plt.subplots(
@@ -243,26 +263,24 @@ def plot_grid_heatmap(csv_path: Path, output_path: Path) -> Path:
         constrained_layout=True,
     )
 
-    alpha_image = ax_alpha.imshow(
+    alpha_image = ax_alpha.pcolormesh(
+        gamma_edges,
+        disorder_edges,
         alpha_matrix_np,
-        origin="lower",
-        aspect="auto",
         cmap="viridis",
         vmin=float(np.min(alpha_matrix_np)),
         vmax=float(np.max(alpha_matrix_np)),
+        shading="flat",
     )
-
-    x_positions = np.arange(len(GRID_GAMMA_VALUES), dtype=float)
-    y_positions = np.arange(len(GRID_W_VALUES), dtype=float)
-    grid_x, grid_y = np.meshgrid(x_positions, y_positions)
+    ax_alpha.set_aspect("auto")
 
     for y_index, disorder_strength in enumerate(GRID_W_VALUES):
         for x_index, gamma in enumerate(GRID_GAMMA_VALUES):
             alpha_val = alpha_map[(disorder_strength, gamma)]
             text_color = "white" if alpha_val < 0.45 else "black"
             ax_alpha.text(
-                x_index,
-                y_index,
+                gamma,
+                disorder_strength,
                 f"{alpha_val:.2f}",
                 ha="center",
                 va="center",
@@ -281,34 +299,36 @@ def plot_grid_heatmap(csv_path: Path, output_path: Path) -> Path:
     )
     ax_alpha.clabel(contour, fmt={0.50: r"$\alpha=0.50$"}, inline=True, fontsize=8)
 
-    ax_alpha.set_xticks(x_positions)
+    ax_alpha.set_xticks(gamma_centers)
     ax_alpha.set_xticklabels([f"{value:.2f}" for value in GRID_GAMMA_VALUES])
-    ax_alpha.set_yticks(y_positions)
+    ax_alpha.set_yticks(disorder_centers)
     ax_alpha.set_yticklabels([f"{value:.1f}" for value in GRID_W_VALUES])
     ax_alpha.set_xlabel(r"Dephasing $\gamma$")
     ax_alpha.set_ylabel(r"Disorder $W$")
-    ax_alpha.set_title(r"$\alpha_{late}$ Phase Map")
+    ax_alpha.set_title(r"Transport exponent $\alpha_{late}$")
 
     alpha_colorbar = fig.colorbar(alpha_image, ax=ax_alpha, pad=0.02)
     alpha_colorbar.set_label(r"$\alpha_{late}$")
     alpha_colorbar.ax.axhline(0.5, color="white", linestyle="--", linewidth=1.5)
 
-    ipr_image = ax_ipr.imshow(
+    ipr_image = ax_ipr.pcolormesh(
+        gamma_edges,
+        disorder_edges,
         ipr_matrix_np,
-        origin="lower",
-        aspect="auto",
         cmap="plasma",
         vmin=float(np.min(ipr_matrix_np)),
         vmax=float(np.max(ipr_matrix_np)),
+        shading="flat",
     )
+    ax_ipr.set_aspect("auto")
 
     for y_index, disorder_strength in enumerate(GRID_W_VALUES):
         for x_index, gamma in enumerate(GRID_GAMMA_VALUES):
             ipr_val = ipr_map[(disorder_strength, gamma)]
             text_color = "white" if ipr_val > 0.04 else "black"
             ax_ipr.text(
-                x_index,
-                y_index,
+                gamma,
+                disorder_strength,
                 f"{ipr_val:.3f}",
                 ha="center",
                 va="center",
@@ -317,16 +337,44 @@ def plot_grid_heatmap(csv_path: Path, output_path: Path) -> Path:
                 fontweight="semibold",
             )
 
-    ax_ipr.set_xticks(x_positions)
+    ax_ipr.set_xticks(gamma_centers)
     ax_ipr.set_xticklabels([f"{value:.2f}" for value in GRID_GAMMA_VALUES])
-    ax_ipr.set_yticks(y_positions)
+    ax_ipr.set_yticks(disorder_centers)
     ax_ipr.set_yticklabels([f"{value:.1f}" for value in GRID_W_VALUES])
     ax_ipr.set_xlabel(r"Dephasing $\gamma$")
     ax_ipr.set_ylabel(r"Disorder $W$")
-    ax_ipr.set_title(r"$IPR_{final}$ Localization Map")
+    ax_ipr.set_title(r"Final localization $IPR_{final}$")
 
     ipr_colorbar = fig.colorbar(ipr_image, ax=ax_ipr, pad=0.02)
     ipr_colorbar.set_label(r"$IPR_{final}$")
+
+    def add_edge_hit_hatching(axis: Any) -> None:
+        for y_index, disorder_strength in enumerate(disorder_centers):
+            for x_index, gamma in enumerate(gamma_centers):
+                if not edge_hit_map[(float(disorder_strength), float(gamma))]:
+                    continue
+                rect = Rectangle(
+                    (gamma_edges[x_index], disorder_edges[y_index]),
+                    gamma_edges[x_index + 1] - gamma_edges[x_index],
+                    disorder_edges[y_index + 1] - disorder_edges[y_index],
+                    fill=False,
+                    hatch="//",
+                    edgecolor="black",
+                    linewidth=0.5,
+                )
+                axis.add_patch(rect)
+
+    add_edge_hit_hatching(ax_alpha)
+    add_edge_hit_hatching(ax_ipr)
+    fig.text(
+        0.5,
+        0.01,
+        "Hatched cells mark edge_hit / boundary-affected runs.",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#333333",
+    )
 
     fig.savefig(output_path, dpi=220)
     plt.close(fig)
