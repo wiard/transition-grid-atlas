@@ -45,11 +45,19 @@ from hardware.photonic_wafer import (
     photonic_wafer_from_dict,
 )
 from hardware.transition_tuner import (
+    build_base_hamiltonian,
     fixed_grid_from_dict,
     noise_operators_from_profiles,
     random_transition_search,
     transition_tuner_config_from_dict,
 )
+from hardware.transition_motor import (
+    build_default_motor_basis,
+    build_control_hamiltonian,
+    random_restart_transition_motor_search,
+    transition_motor_config_from_dict,
+)
+from hardware.sensitivity import compute_sensitivity_matrix, write_sensitivity_csv
 from hardware.wafer_ensemble import run_wafer_ensemble_study
 from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
@@ -984,6 +992,88 @@ def run_wafer_ensemble_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_transition_motor_mode(
+    config: dict[str, Any],
+    *,
+    report_sensitivity: bool = False,
+) -> int:
+    motor_config, outputs = transition_motor_config_from_dict(config)
+    grid = motor_config.grid
+    registry = motor_config.knob_registry
+    basis = build_default_motor_basis(grid)
+    H0 = build_base_hamiltonian(grid)
+    result = random_restart_transition_motor_search(
+        H0,
+        grid,
+        motor_config.noise_profiles,
+        basis,
+        registry,
+        motor_config,
+    )
+
+    sensitivity_path = None
+    if report_sensitivity or outputs.get("sensitivity_csv_path"):
+        times = np.linspace(motor_config.time_min, motor_config.time_max, motor_config.n_time_samples, dtype=np.float64)
+
+        def metrics_fn(theta: dict[str, float]):
+            H = build_control_hamiltonian(H0, grid, theta, basis, registry)
+            from hardware.objectives import evaluate_motor_metrics
+
+            return evaluate_motor_metrics(
+                H,
+                motor_config.noise_profiles,
+                grid,
+                theta,
+                times,
+                motor_config.objective_weights,
+                n_modes=motor_config.n_transport_modes,
+            )
+
+        entries = compute_sensitivity_matrix(
+            metrics_fn,
+            result.best_theta,
+            registry,
+            eps=motor_config.finite_diff_eps,
+            metric_names=[
+                "transport_efficiency",
+                "noise_action_on_info",
+                "noise_leakage",
+                "control_cost",
+                "objective",
+            ],
+        )
+        sensitivity_path = write_sensitivity_csv(
+            outputs.get("sensitivity_csv_path", OUTPUTS_DIR / "transition_motor_sensitivity.csv"),
+            entries,
+        )
+
+    print("Transition Motor Instrumentation")
+    print(f"fixed_grid_sites = {grid.n_sites}")
+    print(f"fixed_grid_edges = {len(grid.edges)}")
+    print(f"active_knobs = {registry.names()}")
+    print(f"baseline_transport_efficiency = {result.baseline_metrics.transport_efficiency:.6f}")
+    print(f"best_transport_efficiency = {result.best_metrics.transport_efficiency:.6f}")
+    print(f"baseline_noise_action_on_info = {result.baseline_metrics.noise_action_on_info:.6f}")
+    print(f"best_noise_action_on_info = {result.best_metrics.noise_action_on_info:.6f}")
+    print(f"baseline_noise_leakage = {result.baseline_metrics.noise_leakage:.6f}")
+    print(f"best_noise_leakage = {result.best_metrics.noise_leakage:.6f}")
+    print(f"baseline_control_cost = {result.baseline_metrics.control_cost:.6f}")
+    print(f"best_control_cost = {result.best_metrics.control_cost:.6f}")
+    print(f"baseline_objective = {result.baseline_metrics.objective:.6f}")
+    print(f"best_objective = {result.best_metrics.objective:.6f}")
+    print(f"objective_improvement = {result.objective_improvement:.6f}")
+    print(f"best_theta = {result.best_theta}")
+    print(f"top_sensitivities = {result.top_sensitivities}")
+    print(f"sensitivity_csv_path = {sensitivity_path if sensitivity_path is not None else 'not_written'}")
+    print(
+        "interpretation = The transition motor does not change the physical grid. "
+        "It exposes interpretable knobs on the effective Hamiltonian and measures "
+        "how each knob affects transport, noise-action on information modes, leakage "
+        "and control cost. This is hardware-native error suppression, not full QEC."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1029,6 +1119,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-tuner YAML path; accepted after the subcommand for operator convenience",
     )
+    transition_motor_parser = subparsers.add_parser(
+        "transition-motor",
+        help="Run the instrumented transition motor control stack",
+    )
+    transition_motor_parser.add_argument(
+        "--config",
+        dest="transition_motor_config",
+        default=None,
+        help="Optional transition-motor YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_parser.add_argument(
+        "--report-sensitivity",
+        action="store_true",
+        help="Write a sensitivity atlas CSV for the transition motor operating point",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1056,6 +1161,7 @@ def main() -> int:
     config_path = Path(
         getattr(args, "hardware_config", None)
         or getattr(args, "transition_tune_config", None)
+        or getattr(args, "transition_motor_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1082,6 +1188,8 @@ def main() -> int:
         )
     if args.command == "transition-tune":
         return run_transition_tune_mode(config)
+    if args.command == "transition-motor":
+        return run_transition_motor_mode(config, report_sensitivity=args.report_sensitivity)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
