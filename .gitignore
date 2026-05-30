@@ -17,6 +17,7 @@ atlas/plots/*.png
 atlas/reports/*.md
 outputs/*.csv
 outputs/*.png
+configs/generated/
 results/*.csv
 results/*.json
 results/*.npy

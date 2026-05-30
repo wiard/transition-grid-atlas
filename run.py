@@ -38,6 +38,7 @@ from hardware.constraints import (
     validate_gamma_range,
     validate_wafer_config,
 )
+from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -59,6 +60,7 @@ LAB_RESULTS_DIR = PROJECT_ROOT / "results"
 LAB_TRAJECTORIES_DIR = LAB_RESULTS_DIR / "trajectories"
 LAB_RENDERS_DIR = LAB_RESULTS_DIR / "renders"
 LAB_LEDGER_PATH = LAB_RESULTS_DIR / "master_results.csv"
+GENERATED_CONFIGS_DIR = PROJECT_ROOT / "configs" / "generated"
 MASTER_RESULTS_PATH = ATLAS_RESULTS_DIR / "master_results.csv"
 LATEST_REPORT_PATH = ATLAS_REPORTS_DIR / "latest_report.md"
 
@@ -123,6 +125,11 @@ def artifact_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def hardware_mapping_config_hash(config: dict[str, Any]) -> str:
+    payload = yaml.safe_dump(config, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
 def resolve_lab_artifact_path(run_id: str | None, artifact_path: str | None) -> Path:
@@ -825,7 +832,12 @@ def run_inverse_mode(config: dict[str, Any]) -> int:
     return 0
 
 
-def run_hardware_map_mode(config: dict[str, Any]) -> int:
+def run_hardware_map_mode(
+    config: dict[str, Any],
+    *,
+    emit_lab_config: bool = False,
+    out_config: str | None = None,
+) -> int:
     hardware_block = dict(config.get("hardware", {}))
     noise_block = dict(config.get("noise_controller", {}))
     mapping_block = dict(config.get("mapping", {}))
@@ -849,10 +861,47 @@ def run_hardware_map_mode(config: dict[str, Any]) -> int:
         if index < 0 or index >= wafer.n_sites:
             raise ValueError(f"target index out of range for wafer layout: {index}")
 
-    recommended_kta_command = (
-        f"python run.py lab --mode lindblad --gamma {gamma_eff:.6f} "
-        f"# set effective W={W_eff:.6f} in a lab override config"
-    )
+    generated_lab_config = None
+    run_command = None
+    if emit_lab_config:
+        config_hash = hardware_mapping_config_hash(
+            {
+                "hardware": hardware_block,
+                "noise_controller": noise_block,
+                "mapping": mapping_block,
+                "W_eff": round(W_eff, 12),
+                "gamma_eff": round(gamma_eff, 12),
+            }
+        )
+        output_path = (
+            Path(out_config).expanduser().resolve()
+            if out_config
+            else (GENERATED_CONFIGS_DIR / f"photonic_wafer_{config_hash}.yaml").resolve()
+        )
+        metadata = {
+            "layout": wafer.layout,
+            "n_sites": wafer.n_sites,
+            "calibration_note": str(
+                mapping_block.get(
+                    "calibration_note",
+                    "Phenomenological first-pass mapping from wafer disorder and stochastic phase modulation to KTA W and gamma.",
+                )
+            ),
+        }
+        generated_lab_config = write_lab_config_from_hardware_mapping(
+            output_path,
+            W_eff=W_eff,
+            gamma_eff=gamma_eff,
+            n_sites=wafer.n_sites,
+            target_indices=target_indices,
+            metadata=metadata,
+        )
+        run_command = f"python run.py --config {generated_lab_config} lab --mode lindblad"
+    else:
+        run_command = (
+            f"python run.py lab --mode lindblad --gamma {gamma_eff:.6f} "
+            f"# set effective W={W_eff:.6f} in a lab override config"
+        )
 
     print("Photonic wafer mapping")
     print(f"layout = {wafer.layout}")
@@ -860,7 +909,10 @@ def run_hardware_map_mode(config: dict[str, Any]) -> int:
     print(f"W_eff = {W_eff:.6f}")
     print(f"gamma_eff = {gamma_eff:.6f}")
     print(f"target_detectors = {target_indices}")
-    print(f"recommended_kta_command = {recommended_kta_command}")
+    if generated_lab_config is not None:
+        print(f"generated_lab_config = {generated_lab_config}")
+    print(f"recommended_kta_command = {run_command}")
+    print(f"run_command = {run_command}")
     return 0
 
 
@@ -888,6 +940,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="hardware_config",
         default=None,
         help="Optional hardware-specific YAML path; accepted after the subcommand for operator convenience",
+    )
+    hardware_parser.add_argument(
+        "--emit-lab-config",
+        action="store_true",
+        help="Emit an executable KTA lab override config from the hardware mapping",
+    )
+    hardware_parser.add_argument(
+        "--out-config",
+        default=None,
+        help="Optional output path for the generated lab override config",
     )
     lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
     lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
@@ -920,7 +982,11 @@ def main() -> int:
     if args.command == "inverse":
         return run_inverse_mode(config)
     if args.command == "hardware-map":
-        return run_hardware_map_mode(config)
+        return run_hardware_map_mode(
+            config,
+            emit_lab_config=args.emit_lab_config,
+            out_config=args.out_config,
+        )
     if args.command == "lab":
         return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
     if args.command == "animate":
