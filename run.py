@@ -44,6 +44,12 @@ from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
     photonic_wafer_from_dict,
 )
+from hardware.transition_tuner import (
+    fixed_grid_from_dict,
+    noise_operators_from_profiles,
+    random_transition_search,
+    transition_tuner_config_from_dict,
+)
 from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
@@ -916,6 +922,43 @@ def run_hardware_map_mode(
     return 0
 
 
+def run_transition_tune_mode(config: dict[str, Any]) -> int:
+    tuner_block = dict(config.get("transition_tuner", {}))
+    if not tuner_block:
+        raise ValueError("transition-tune requires a transition_tuner block in the config")
+
+    grid = fixed_grid_from_dict(dict(tuner_block.get("grid", {})))
+    noise_block = dict(tuner_block.get("noise", {}))
+    search_block = dict(tuner_block.get("search", {}))
+    if not noise_block.get("profiles"):
+        raise ValueError("transition-tune requires noise profiles in transition_tuner.noise.profiles")
+
+    noise_ops = noise_operators_from_profiles(list(noise_block["profiles"]))
+    tuner_config = transition_tuner_config_from_dict(search_block)
+    result = random_transition_search(grid, noise_ops, tuner_config)
+    improvement = result.best_objective - result.baseline_objective
+
+    print("Transition dynamics tuner")
+    print(f"fixed_grid_sites = {grid.n_sites}")
+    print(f"fixed_grid_edges = {len(grid.edges)}")
+    print(f"baseline_transport_efficiency = {result.baseline_transport_efficiency:.6f}")
+    print(f"best_transport_efficiency = {result.best_transport_efficiency:.6f}")
+    print(f"baseline_noise_overlap = {result.baseline_noise_overlap:.6f}")
+    print(f"best_noise_overlap = {result.best_noise_overlap:.6f}")
+    print(f"baseline_suppression_score = {result.baseline_suppression_score:.6f}")
+    print(f"best_suppression_score = {result.best_suppression_score:.6f}")
+    print(f"baseline_objective = {result.baseline_objective:.6f}")
+    print(f"best_objective = {result.best_objective:.6f}")
+    print(f"improvement = {improvement:.6f}")
+    print(
+        "interpretation = This is an algebraic first-pass tuner for hardware-native error suppression. "
+        "It does not implement full QEC, syndrome extraction or recovery. "
+        "It searches transition parameters on a fixed grid that reduce phase-noise overlap "
+        "with information-carrying modes."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -951,6 +994,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional output path for the generated lab override config",
     )
+    transition_tune_parser = subparsers.add_parser(
+        "transition-tune",
+        help="Search fixed-grid transition controls for hardware-native error suppression",
+    )
+    transition_tune_parser.add_argument(
+        "--config",
+        dest="transition_tune_config",
+        default=None,
+        help="Optional transition-tuner YAML path; accepted after the subcommand for operator convenience",
+    )
     lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
     lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
     lab_parser.add_argument("--gamma", type=float, default=None, help="Override lab gamma for this run")
@@ -965,7 +1018,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    config_path = Path(getattr(args, "hardware_config", None) or args.config)
+    config_path = Path(
+        getattr(args, "hardware_config", None)
+        or getattr(args, "transition_tune_config", None)
+        or args.config
+    )
     config = load_config(config_path)
     ensure_output_dirs()
 
@@ -987,6 +1044,8 @@ def main() -> int:
             emit_lab_config=args.emit_lab_config,
             out_config=args.out_config,
         )
+    if args.command == "transition-tune":
+        return run_transition_tune_mode(config)
     if args.command == "lab":
         return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
     if args.command == "animate":
