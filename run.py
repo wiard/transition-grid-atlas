@@ -32,6 +32,17 @@ from engine.lab_modes import build_lab_config, run_lab_simulation
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
 from explorer.phase_map import build_phase_matrix, save_phase_map_plot
 from explorer.recursive_hunter import run_recursive_hunter
+from hardware.constraints import (
+    validate_coupling_range,
+    validate_disorder_range,
+    validate_gamma_range,
+    validate_wafer_config,
+)
+from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
+from hardware.photonic_wafer import (
+    disorder_strength_from_fabrication,
+    photonic_wafer_from_dict,
+)
 from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
@@ -814,6 +825,45 @@ def run_inverse_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_hardware_map_mode(config: dict[str, Any]) -> int:
+    hardware_block = dict(config.get("hardware", {}))
+    noise_block = dict(config.get("noise_controller", {}))
+    mapping_block = dict(config.get("mapping", {}))
+    if not hardware_block:
+        raise ValueError("hardware-map requires a hardware block in the config")
+    if not noise_block:
+        raise ValueError("hardware-map requires a noise_controller block in the config")
+
+    wafer = photonic_wafer_from_dict(hardware_block)
+    controller = noise_controller_from_dict(noise_block)
+    validate_wafer_config(wafer)
+    validate_coupling_range(wafer.coupling_j)
+
+    W_eff = disorder_strength_from_fabrication(wafer)
+    gamma_eff = effective_gamma_from_controller(controller)
+    validate_disorder_range(W_eff)
+    validate_gamma_range(gamma_eff)
+
+    target_indices = [int(index) for index in mapping_block.get("target_indices", [])]
+    for index in target_indices:
+        if index < 0 or index >= wafer.n_sites:
+            raise ValueError(f"target index out of range for wafer layout: {index}")
+
+    recommended_kta_command = (
+        f"python run.py lab --mode lindblad --gamma {gamma_eff:.6f} "
+        f"# set effective W={W_eff:.6f} in a lab override config"
+    )
+
+    print("Photonic wafer mapping")
+    print(f"layout = {wafer.layout}")
+    print(f"n_sites = {wafer.n_sites}")
+    print(f"W_eff = {W_eff:.6f}")
+    print(f"gamma_eff = {gamma_eff:.6f}")
+    print(f"target_detectors = {target_indices}")
+    print(f"recommended_kta_command = {recommended_kta_command}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -832,6 +882,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("hunter", help="Run recursive search for diffusive candidates")
     subparsers.add_parser("audit", help="Audit ledger evidence under strict modern thresholds")
     subparsers.add_parser("inverse", help="Run inverse transition symmetry analysis")
+    hardware_parser = subparsers.add_parser("hardware-map", help="Map a photonic wafer config into effective KTA W and gamma parameters")
+    hardware_parser.add_argument(
+        "--config",
+        dest="hardware_config",
+        default=None,
+        help="Optional hardware-specific YAML path; accepted after the subcommand for operator convenience",
+    )
     lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
     lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
     lab_parser.add_argument("--gamma", type=float, default=None, help="Override lab gamma for this run")
@@ -846,7 +903,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    config = load_config(Path(args.config))
+    config_path = Path(getattr(args, "hardware_config", None) or args.config)
+    config = load_config(config_path)
     ensure_output_dirs()
 
     if args.command == "single":
@@ -861,6 +919,8 @@ def main() -> int:
         return run_audit_mode(config)
     if args.command == "inverse":
         return run_inverse_mode(config)
+    if args.command == "hardware-map":
+        return run_hardware_map_mode(config)
     if args.command == "lab":
         return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
     if args.command == "animate":
