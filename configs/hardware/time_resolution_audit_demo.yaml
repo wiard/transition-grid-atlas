@@ -1,0 +1,15 @@
+time_resolution_audit:
+  base_comparison_config: configs/hardware/objective_mode_comparison_demo.yaml
+
+  time_step_multipliers: [0.5, 1.0, 2.0]
+
+  sensitivity_thresholds:
+    common_balanced_relative_change: 0.10
+    detector_delta_absolute_change: 0.01
+    noise_action_delta_absolute_change: 0.001
+    leakage_delta_absolute_change: 0.0005
+
+  outputs:
+    csv_path: outputs/time_resolution_audit.csv
+    summary_path: outputs/time_resolution_audit_summary.json
+    plot_path: results/renders/time_resolution_audit.png

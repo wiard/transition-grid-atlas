@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import asdict
 from datetime import datetime, UTC
 import hashlib
 from pathlib import Path
@@ -90,6 +91,12 @@ from hardware.transition_motor import (
     build_control_hamiltonian,
     random_restart_transition_motor_search,
     transition_motor_config_from_dict,
+)
+from hardware.time_resolution_audit import (
+    plot_time_resolution_audit,
+    run_time_resolution_audit,
+    write_time_resolution_csv,
+    write_time_resolution_summary_json,
 )
 from hardware.sensitivity import compute_sensitivity_matrix, write_sensitivity_csv
 from hardware.wafer_ensemble import run_wafer_ensemble_study
@@ -1544,6 +1551,38 @@ def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_time_resolution_audit_mode(config: dict[str, Any]) -> int:
+    runs, summary = run_time_resolution_audit(config)
+    block = dict(config["time_resolution_audit"])
+    csv_path = write_time_resolution_csv(block["outputs"]["csv_path"], runs)
+    summary_path = write_time_resolution_summary_json(block["outputs"]["summary_path"], summary)
+    plot_path = plot_time_resolution_audit(runs, block["outputs"]["plot_path"])
+
+    print("Time-Resolution Sensitivity Audit")
+    print(f"time_step_multipliers = {[float(run.time_step_multiplier) for run in runs]}")
+    print(f"baseline_multiplier = {summary.baseline_multiplier}")
+    print(f"runs = {[asdict(run) for run in runs]}")
+    print(f"common_balanced_relative_change_max = {summary.common_balanced_relative_change_max:.6f}")
+    print(f"detector_delta_absolute_change_max = {summary.detector_delta_absolute_change_max:.6f}")
+    print(f"noise_action_delta_absolute_change_max = {summary.noise_action_delta_absolute_change_max:.6f}")
+    print(f"leakage_delta_absolute_change_max = {summary.leakage_delta_absolute_change_max:.6f}")
+    print(f"sign_stable_common_balanced = {summary.sign_stable_common_balanced}")
+    print(f"sign_stable_detector_delta = {summary.sign_stable_detector_delta}")
+    print(f"sign_stable_noise_action_delta = {summary.sign_stable_noise_action_delta}")
+    print(f"sign_stable_leakage_delta = {summary.sign_stable_leakage_delta}")
+    print(f"time_resolution_sensitive = {summary.time_resolution_sensitive}")
+    print(f"registry_recommendation = {summary.registry_recommendation}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This audit treats time only as a numerical time-resolution parameter "
+        "in the Hamiltonian transport evaluation. It tests robustness of objective-mode comparison "
+        "metrics under finer and coarser time grids. It does not make claims about the fundamental nature of time."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1668,6 +1707,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional objective-mode comparison YAML path; accepted after the subcommand for operator convenience",
     )
+    time_resolution_audit_parser = subparsers.add_parser(
+        "time-resolution-audit",
+        help="Audit objective-mode comparison sensitivity to Hamiltonian time-grid resolution",
+    )
+    time_resolution_audit_parser.add_argument(
+        "--config",
+        dest="time_resolution_audit_config",
+        default=None,
+        help="Optional time-resolution audit YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1701,6 +1750,7 @@ def main() -> int:
         or getattr(args, "transition_motor_pareto_config", None)
         or getattr(args, "transition_motor_pareto_audit_config", None)
         or getattr(args, "objective_mode_comparison_config", None)
+        or getattr(args, "time_resolution_audit_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1750,6 +1800,8 @@ def main() -> int:
         return run_transition_motor_pareto_audit_mode(config_path)
     if args.command == "objective-mode-comparison":
         return run_objective_mode_comparison_mode(config)
+    if args.command == "time-resolution-audit":
+        return run_time_resolution_audit_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
