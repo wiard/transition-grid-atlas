@@ -50,6 +50,14 @@ from hardware.ensemble_statistics import (
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
+from hardware.objective_mode_comparison import (
+    bootstrap_delta_ci,
+    plot_objective_mode_comparison,
+    run_objective_mode_comparison,
+    run_scale_sensitivity,
+    write_comparison_csv,
+    write_comparison_summary_json,
+)
 from hardware.objective_modes import ObjectiveNormalizationScale, default_objective_modes
 from hardware.objectives import evaluate_motor_metrics
 from hardware.motor_pareto import (
@@ -1401,6 +1409,97 @@ def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
     return 0
 
 
+def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
+    samples, summary = run_objective_mode_comparison(config)
+    block = dict(config["objective_mode_comparison"])
+    bootstrap_block = dict(block["bootstrap"])
+    bootstrap_ci = {
+        "detector_delta": bootstrap_delta_ci(
+            np.array([sample.detector_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]),
+        ),
+        "noise_action_delta": bootstrap_delta_ci(
+            np.array([sample.noise_action_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 1,
+        ),
+        "leakage_delta": bootstrap_delta_ci(
+            np.array([sample.leakage_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 2,
+        ),
+        "control_cost_delta": bootstrap_delta_ci(
+            np.array([sample.control_cost_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 3,
+        ),
+        "objective_delta": bootstrap_delta_ci(
+            np.array([sample.objective_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 4,
+        ),
+    }
+    scale_sensitivity = run_scale_sensitivity(config)
+    csv_path = write_comparison_csv(block["outputs"]["csv_path"], samples)
+    summary_path = write_comparison_summary_json(
+        block["outputs"]["summary_path"],
+        summary,
+        bootstrap_ci=bootstrap_ci,
+        scale_sensitivity=scale_sensitivity,
+    )
+    plot_path = plot_objective_mode_comparison(samples, block["outputs"]["plot_path"])
+
+    print("Objective Mode Comparison")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"detector_win_rate = {summary.detector_win_rate:.6f}")
+    print(f"noise_action_win_rate = {summary.noise_action_win_rate:.6f}")
+    print(f"leakage_win_rate = {summary.leakage_win_rate:.6f}")
+    print(f"objective_win_rate = {summary.objective_win_rate:.6f}")
+    print(f"control_cost_win_rate = {summary.control_cost_win_rate:.6f}")
+    print(f"all_core_win_rate = {summary.all_core_win_rate:.6f}")
+    print(f"mean_detector_delta = {summary.mean_detector_delta:.6f}")
+    print(
+        "bootstrap_detector_delta_95ci = "
+        f"({bootstrap_ci['detector_delta'][0]:.6f}, {bootstrap_ci['detector_delta'][1]:.6f})"
+    )
+    print(f"mean_noise_action_delta = {summary.mean_noise_action_delta:.6f}")
+    print(
+        "bootstrap_noise_action_delta_95ci = "
+        f"({bootstrap_ci['noise_action_delta'][0]:.6f}, {bootstrap_ci['noise_action_delta'][1]:.6f})"
+    )
+    print(f"mean_leakage_delta = {summary.mean_leakage_delta:.6f}")
+    print(
+        "bootstrap_leakage_delta_95ci = "
+        f"({bootstrap_ci['leakage_delta'][0]:.6f}, {bootstrap_ci['leakage_delta'][1]:.6f})"
+    )
+    print(f"mean_control_cost_delta = {summary.mean_control_cost_delta:.6f}")
+    print(
+        "bootstrap_control_cost_delta_95ci = "
+        f"({bootstrap_ci['control_cost_delta'][0]:.6f}, {bootstrap_ci['control_cost_delta'][1]:.6f})"
+    )
+    print(f"mean_objective_delta = {summary.mean_objective_delta:.6f}")
+    print(
+        "bootstrap_objective_delta_95ci = "
+        f"({bootstrap_ci['objective_delta'][0]:.6f}, {bootstrap_ci['objective_delta'][1]:.6f})"
+    )
+    print(f"scale_sensitivity = {scale_sensitivity}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This paired synthetic ensemble compares raw and normalized objective modes "
+        "on identical disorder/noise samples, testing whether normalized mode improves multi-objective "
+        "balance beyond a single smoke-run. It is synthetic validation, not experimental validation."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1515,6 +1614,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-motor Pareto-audit YAML path; accepted after the subcommand for operator convenience",
     )
+    objective_mode_comparison_parser = subparsers.add_parser(
+        "objective-mode-comparison",
+        help="Run a paired synthetic comparison between raw and normalized objective modes",
+    )
+    objective_mode_comparison_parser.add_argument(
+        "--config",
+        dest="objective_mode_comparison_config",
+        default=None,
+        help="Optional objective-mode comparison YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1547,10 +1656,12 @@ def main() -> int:
         or getattr(args, "transition_motor_ensemble_config", None)
         or getattr(args, "transition_motor_pareto_config", None)
         or getattr(args, "transition_motor_pareto_audit_config", None)
+        or getattr(args, "objective_mode_comparison_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
     config = load_config(config_path)
+    config["__config_path__"] = str(config_path)
     ensure_output_dirs()
 
     if args.command == "single":
@@ -1593,6 +1704,8 @@ def main() -> int:
         return run_transition_motor_pareto_mode(config)
     if args.command == "transition-motor-pareto-audit":
         return run_transition_motor_pareto_audit_mode(config_path)
+    if args.command == "objective-mode-comparison":
+        return run_objective_mode_comparison_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
