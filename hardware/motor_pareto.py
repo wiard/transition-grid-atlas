@@ -18,9 +18,10 @@ import numpy as np
 from hardware.control_basis import make_control_basis
 from hardware.ensemble_statistics import compute_win_rates
 from hardware.motor_ensemble import (
+    DetailedMotorEnsembleSample,
     MotorEnsembleSampleResult,
-    TransitionMotorEnsembleConfig,
     run_single_motor_ensemble_sample,
+    run_single_motor_ensemble_sample_detailed,
     sample_fabrication_disorder_profiles,
     sample_phase_noise_profiles,
     transition_motor_ensemble_from_dict,
@@ -280,7 +281,34 @@ def _summarize_samples(name: str, weight_set: ObjectiveWeightSet, samples: list[
     )
 
 
-def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResult], ParetoSweepSummary]:
+def _sample_row_from_detail(detail: DetailedMotorEnsembleSample) -> dict[str, object]:
+    return {
+        "sample_id": int(detail.sample.sample_id),
+        "detector_success_gain": float(detail.sample.detector_success_gain),
+        "transport_gain": float(detail.sample.transport_gain),
+        "noise_action_reduction": float(detail.sample.noise_action_reduction),
+        "noise_leakage_reduction": float(detail.sample.noise_leakage_reduction),
+        "objective_gain": float(detail.sample.objective_gain),
+        "baseline_detector_success": float(detail.sample.baseline_detector_success),
+        "best_detector_success": float(detail.sample.best_detector_success),
+        "baseline_transport_efficiency": float(detail.sample.baseline_transport_efficiency),
+        "best_transport_efficiency": float(detail.sample.best_transport_efficiency),
+        "baseline_noise_action_on_info": float(detail.sample.baseline_noise_action_on_info),
+        "best_noise_action_on_info": float(detail.sample.best_noise_action_on_info),
+        "baseline_noise_leakage": float(detail.sample.baseline_noise_leakage),
+        "best_noise_leakage": float(detail.sample.best_noise_leakage),
+        "baseline_control_cost": float(detail.sample.baseline_control_cost),
+        "best_control_cost": float(detail.sample.best_control_cost),
+        "saturated_knobs": float(detail.sample.saturated_knobs),
+        "near_bound_knobs": float(detail.sample.near_bound_knobs),
+        "success": float(1.0 if detail.sample.success else 0.0),
+        "best_theta": dict(detail.best_theta),
+    }
+
+
+def run_pareto_weight_sweep_with_samples(
+    config: dict[str, Any],
+) -> tuple[list[ParetoRunResult], ParetoSweepSummary, dict[str, list[dict[str, object]]]]:
     parsed = transition_motor_pareto_from_dict(config)
     ensemble = parsed.ensemble_config
     base_motor = ensemble.motor_config
@@ -301,6 +329,7 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
     phase_noise_corr = float(ensemble.phase_noise["correlation_length_sites"])
 
     results: list[ParetoRunResult] = []
+    per_preset_sample_rows: dict[str, list[dict[str, object]]] = {}
     for weight_set in parsed.weight_sets:
         motor_config = replace(
             base_motor,
@@ -312,6 +341,7 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
             },
         )
         samples: list[MotorEnsembleSampleResult] = []
+        sample_rows: list[dict[str, object]] = []
         for sample_id, onsite_profile in enumerate(fabrication_profiles):
             noise_profiles = sample_phase_noise_profiles(
                 phase_noise_per_sample,
@@ -320,7 +350,7 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
                 phase_noise_corr,
                 phase_noise_seed + sample_id,
             )
-            sample = run_single_motor_ensemble_sample(
+            detail = run_single_motor_ensemble_sample_detailed(
                 grid,
                 registry,
                 basis,
@@ -329,8 +359,11 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
                 motor_config,
                 ensemble.success_criteria,
             )
-            samples.append(replace(sample, sample_id=sample_id))
+            sample = replace(detail.sample, sample_id=sample_id)
+            samples.append(sample)
+            sample_rows.append(_sample_row_from_detail(replace(detail, sample=sample)))
         results.append(_summarize_samples(weight_set.name, weight_set, samples))
+        per_preset_sample_rows[weight_set.name] = sample_rows
 
     marked = mark_pareto_front(results, maximize=parsed.maximize, minimize=parsed.minimize)
     summary = ParetoSweepSummary(
@@ -341,7 +374,12 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
         best_leakage_name=max(marked, key=lambda item: item.mean_noise_leakage_reduction).name,
         best_balanced_name=choose_best_balanced(marked),
     )
-    return marked, summary
+    return marked, summary, per_preset_sample_rows
+
+
+def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResult], ParetoSweepSummary]:
+    results, summary, _ = run_pareto_weight_sweep_with_samples(config)
+    return results, summary
 
 
 def write_pareto_csv(path: str | Path, results: list[ParetoRunResult]) -> Path:

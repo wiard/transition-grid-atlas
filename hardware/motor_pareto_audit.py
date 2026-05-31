@@ -1,10 +1,11 @@
-"""Stress audit for Pareto weight sweeps in the KTA transition motor."""
+"""Pareto stress, normalization, and regime-separation audit for the transition motor."""
 
 from __future__ import annotations
 
 import csv
 import json
-from dataclasses import asdict, dataclass, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,674 +15,551 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
-from hardware.control_basis import make_control_basis
-from hardware.ensemble_statistics import bootstrap_mean_ci
-from hardware.motor_audit import knob_bound_statuses
-from hardware.motor_ensemble import (
-    DetailedMotorEnsembleSample,
-    run_single_motor_ensemble_sample_detailed,
-    sample_fabrication_disorder_profiles,
-    sample_phase_noise_profiles,
-)
-from hardware.motor_pareto import (
-    ObjectiveWeightSet,
-    ParetoRunResult,
-    load_weight_sets,
-    mark_pareto_front,
-    validate_weight_set,
-)
-from hardware.transition_motor import TransitionMotorConfig
-from hardware.transition_tuner import fixed_grid_from_dict
 from hardware.control_knobs import knob_registry_from_dicts
+from hardware.motor_pareto import (
+    ParetoRunResult,
+    ObjectiveWeightSet,
+    run_pareto_weight_sweep_with_samples,
+)
 
 
 @dataclass(frozen=True)
-class PresetConfidenceInterval:
+class ObjectiveComponentScale:
+    preset_name: str
+    mean_detector_component: float
+    mean_noise_action_component: float
+    mean_leakage_component: float
+    mean_control_cost_component: float
+    dominant_component: str
+    detector_to_noise_ratio: float
+    detector_to_leakage_ratio: float
+
+
+@dataclass(frozen=True)
+class PresetCI:
     preset_name: str
     metric: str
     mean: float
+    median: float
     ci_low: float
     ci_high: float
-    n_bootstrap: int
 
 
 @dataclass(frozen=True)
-class KnobProfileSummary:
+class KnobProfile:
     preset_name: str
-    knob: str
-    mean_value: float
-    mean_abs_value: float
-    saturation_rate: float
-    near_bound_rate: float
+    mean_theta: dict[str, float]
+    std_theta: dict[str, float]
+    fraction_at_upper_bound: dict[str, float]
+    fraction_at_lower_bound: dict[str, float]
 
 
 @dataclass(frozen=True)
-class ObjectiveScaleSummary:
-    transport_scale: float
-    noise_action_scale: float
-    leakage_scale: float
-    control_cost_scale: float
-    raw_scale_ratio: float
+class RegimeDistance:
+    preset_a: str
+    preset_b: str
+    distance: float
 
 
 @dataclass(frozen=True)
-class ParetoAuditRunResult:
-    name: str
-    weights: ObjectiveWeightSet
-    n_samples: int
-    success_rate: float
-    mean_detector_success_gain: float
-    mean_noise_action_reduction: float
-    mean_noise_leakage_reduction: float
-    mean_objective_gain: float
-    mean_normalized_objective_gain: float
-    mean_best_control_cost: float
-    mean_saturated_knobs: float
-    mean_near_bound_knobs: float
-    mean_transport_term_gain: float
-    mean_noise_action_term_gain: float
-    mean_noise_leakage_term_gain: float
-    mean_control_cost_penalty: float
-    detector_gain_ci_low: float
-    detector_gain_ci_high: float
-    noise_action_ci_low: float
-    noise_action_ci_high: float
-    leakage_ci_low: float
-    leakage_ci_high: float
-    objective_ci_low: float
-    objective_ci_high: float
-    normalized_objective_ci_low: float
-    normalized_objective_ci_high: float
-    mean_theta_l2: float
-    knob_profiles: list[KnobProfileSummary]
-    is_pareto_optimal: bool = False
+class ParetoAuditSummary:
+    n_presets: int
+    base_preset_names: list[str]
+    stress_preset_names: list[str]
+    dominant_component_overall: str
+    component_scaling_issue: bool
+    mean_pairwise_regime_distance: float
+    closest_presets: tuple[str, str]
+    most_separated_presets: tuple[str, str]
+    compressed_frontier: bool
 
 
 @dataclass(frozen=True)
-class ParetoStressAuditSummary:
-    n_weight_sets: int
-    n_samples_per_weight_set: int
-    pareto_optimal_names: list[str]
-    best_detector_name: str
-    best_noise_action_name: str
-    best_leakage_name: str
-    best_cost_name: str
-    best_normalized_name: str
-    normalization_recommended: bool
-    regime_assessment: str
-    mean_pairwise_theta_distance: float
-    min_pairwise_theta_distance: float
-    objective_scale_summary: ObjectiveScaleSummary
-
-
-@dataclass(frozen=True)
-class TransitionMotorParetoAuditConfig:
-    motor_config: TransitionMotorConfig
-    fabrication_disorder: dict[str, float | int]
-    phase_noise: dict[str, float | int]
-    success_criteria: dict[str, float]
-    weight_sets: list[ObjectiveWeightSet]
-    maximize: list[str]
-    minimize: list[str]
+class ParetoAuditResult:
+    pareto_results: list[ParetoRunResult]
+    component_scales: list[ObjectiveComponentScale]
+    normalized_scores: dict[str, float]
+    confidence_intervals: list[PresetCI]
+    knob_profiles: list[KnobProfile]
+    regime_distances: list[RegimeDistance]
+    summary: ParetoAuditSummary
+    best_normalized_score_name: str
+    n_samples_per_preset: int
     bootstrap_n: int
-    bootstrap_seed: int
-    outputs: dict[str, str]
+    bootstrap_ci: float
+    csv_path: str | None = None
+    summary_path: str | None = None
+    plot_path: str | None = None
 
 
-def transition_motor_pareto_audit_from_dict(data: dict[str, Any]) -> TransitionMotorParetoAuditConfig:
-    block = dict(data["transition_motor_pareto_audit"])
-    grid = fixed_grid_from_dict(dict(block["grid"]))
-    registry = knob_registry_from_dicts(list(block["knobs"]))
-    optimizer = dict(block["optimizer"])
-    motor_config = TransitionMotorConfig(
-        grid=grid,
-        knob_registry=registry,
-        objective_weights={
-            "transport": 1.0,
-            "noise_action": 0.5,
-            "leakage": 0.25,
-            "control_cost": 0.01,
-        },
-        noise_profiles=[],
-        time_min=float(optimizer["time_min"]),
-        time_max=float(optimizer["time_max"]),
-        n_time_samples=int(optimizer["n_time_samples"]),
-        n_transport_modes=int(optimizer["n_transport_modes"]),
-        finite_diff_eps=float(optimizer["finite_diff_eps"]),
-        optimizer_steps=int(optimizer["optimizer_steps"]),
-        optimizer_step_size=float(optimizer["optimizer_step_size"]),
-        random_restarts=int(optimizer["random_restarts"]),
-        seed=int(optimizer["seed"]),
-    )
-    weight_sets = load_weight_sets(block)
-    for item in weight_sets:
-        validate_weight_set(item)
-    audit = dict(block.get("audit", {}))
-    return TransitionMotorParetoAuditConfig(
-        motor_config=motor_config,
-        fabrication_disorder={
-            "n_samples": int(block["fabrication_disorder"]["n_samples"]),
-            "onsite_sigma": float(block["fabrication_disorder"]["onsite_sigma"]),
-            "correlation_length_sites": float(block["fabrication_disorder"]["correlation_length_sites"]),
-            "seed": int(block["fabrication_disorder"]["seed"]),
-        },
-        phase_noise={
-            "n_profiles_per_sample": int(block["phase_noise"]["n_profiles_per_sample"]),
-            "profile_sigma": float(block["phase_noise"]["profile_sigma"]),
-            "correlation_length_sites": float(block["phase_noise"]["correlation_length_sites"]),
-            "seed": int(block["phase_noise"]["seed"]),
-        },
-        success_criteria={
-            "min_objective_gain": float(block["success_criteria"]["min_objective_gain"]),
-            "min_detector_gain": float(block["success_criteria"]["min_detector_gain"]),
-            "min_noise_action_reduction": float(block["success_criteria"]["min_noise_action_reduction"]),
-        },
-        weight_sets=weight_sets,
-        maximize=[str(item) for item in list(block["pareto"]["maximize"])],
-        minimize=[str(item) for item in list(block["pareto"]["minimize"])],
-        bootstrap_n=int(audit.get("n_bootstrap", 2000)),
-        bootstrap_seed=int(audit.get("seed", 321)),
-        outputs={
-            "csv_path": str(block["outputs"]["csv_path"]),
-            "summary_path": str(block["outputs"]["summary_path"]),
-            "plot_path": str(block["outputs"]["plot_path"]),
-        },
-    )
+def load_audit_config(path: str | Path) -> dict[str, Any]:
+    config_path = Path(path).expanduser().resolve()
+    with config_path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if "transition_motor_pareto_audit" not in payload:
+        raise ValueError("audit config must define transition_motor_pareto_audit")
+    block = payload["transition_motor_pareto_audit"]
+    if "base_config" not in block:
+        raise ValueError("transition_motor_pareto_audit.base_config is required")
+    payload["__config_path__"] = str(config_path)
+    return payload
 
 
-def compute_objective_scale_summary(
-    detailed_by_preset: dict[str, list[DetailedMotorEnsembleSample]],
+def _load_yaml(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def _resolve_base_config_path(audit_path: Path, base_config_value: str) -> Path:
+    candidate = Path(base_config_value).expanduser()
+    if candidate.is_absolute() and candidate.exists():
+        return candidate.resolve()
+    relative_to_audit = (audit_path.parent / candidate).resolve()
+    if relative_to_audit.exists():
+        return relative_to_audit
+    relative_to_cwd = (Path.cwd() / candidate).resolve()
+    if relative_to_cwd.exists():
+        return relative_to_cwd
+    raise FileNotFoundError(f"base_config not found: {base_config_value}")
+
+
+def _load_base_pareto_config(audit_config: dict[str, Any]) -> dict[str, Any]:
+    audit_path = Path(str(audit_config["__config_path__"]))
+    block = dict(audit_config["transition_motor_pareto_audit"])
+    base_path = _resolve_base_config_path(audit_path, str(block["base_config"]))
+    base_payload = _load_yaml(base_path)
+    if "transition_motor_pareto" not in base_payload:
+        raise ValueError("base Pareto config must define transition_motor_pareto")
+    return base_payload
+
+
+def merge_base_and_stress_weight_sets(base_config: dict[str, Any], audit_config: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base_config)
+    base_block = dict(merged["transition_motor_pareto"])
+    audit_block = dict(audit_config["transition_motor_pareto_audit"])
+    base_weight_sets = [deepcopy(item) for item in list(base_block["weight_sets"])]
+    stress_weight_sets = [deepcopy(item) for item in list(audit_block["stress_weight_sets"])]
+
+    seen_names: set[str] = set()
+    ordered_weight_sets: list[dict[str, Any]] = []
+    for item in [*base_weight_sets, *stress_weight_sets]:
+        name = str(item["name"])
+        if name in seen_names:
+            raise ValueError(f"duplicate preset name: {name}")
+        seen_names.add(name)
+        ordered_weight_sets.append(item)
+
+    base_block["weight_sets"] = ordered_weight_sets
+    if "outputs" in audit_block:
+        base_block["outputs"] = deepcopy(dict(audit_block["outputs"]))
+    merged["transition_motor_pareto"] = base_block
+    return merged
+
+
+def compute_objective_components_for_result(result: ParetoRunResult) -> dict[str, float]:
+    return {
+        "detector_component": float(result.weights.transport * result.mean_detector_success_gain),
+        "noise_action_component": float(-result.weights.noise_action * result.mean_noise_action_reduction),
+        "leakage_component": float(-result.weights.leakage * result.mean_noise_leakage_reduction),
+        "control_cost_component": float(-result.weights.control_cost * result.mean_best_control_cost),
+    }
+
+
+def compute_component_scale(
+    result: ParetoRunResult,
     *,
-    quantile: float = 0.9,
     eps: float = 1e-12,
-) -> ObjectiveScaleSummary:
-    transport = np.array(
-        [detail.sample.transport_gain for details in detailed_by_preset.values() for detail in details],
-        dtype=np.float64,
-    )
-    noise = np.array(
-        [detail.sample.noise_action_reduction for details in detailed_by_preset.values() for detail in details],
-        dtype=np.float64,
-    )
-    leakage = np.array(
-        [detail.sample.noise_leakage_reduction for details in detailed_by_preset.values() for detail in details],
-        dtype=np.float64,
-    )
-    cost = np.array(
-        [
-            detail.sample.best_control_cost - detail.sample.baseline_control_cost
-            for details in detailed_by_preset.values()
-            for detail in details
-        ],
-        dtype=np.float64,
-    )
-
-    def robust_scale(values: np.ndarray) -> float:
-        scale = float(np.quantile(np.abs(values), quantile))
-        return max(scale, eps)
-
-    transport_scale = robust_scale(transport)
-    noise_scale = robust_scale(noise)
-    leakage_scale = robust_scale(leakage)
-    cost_scale = robust_scale(cost)
-    raw_scale_ratio = float(max(transport_scale, noise_scale, leakage_scale, cost_scale) / min(transport_scale, noise_scale, leakage_scale, cost_scale))
-    return ObjectiveScaleSummary(
-        transport_scale=transport_scale,
-        noise_action_scale=noise_scale,
-        leakage_scale=leakage_scale,
-        control_cost_scale=cost_scale,
-        raw_scale_ratio=raw_scale_ratio,
+) -> ObjectiveComponentScale:
+    components = compute_objective_components_for_result(result)
+    dominant_component = max(components.items(), key=lambda item: abs(item[1]))[0].replace("_component", "")
+    return ObjectiveComponentScale(
+        preset_name=result.name,
+        mean_detector_component=components["detector_component"],
+        mean_noise_action_component=components["noise_action_component"],
+        mean_leakage_component=components["leakage_component"],
+        mean_control_cost_component=components["control_cost_component"],
+        dominant_component=dominant_component,
+        detector_to_noise_ratio=float(abs(components["detector_component"]) / (abs(components["noise_action_component"]) + eps)),
+        detector_to_leakage_ratio=float(abs(components["detector_component"]) / (abs(components["leakage_component"]) + eps)),
     )
 
 
-def normalized_objective_gain(
-    detail: DetailedMotorEnsembleSample,
-    weight_set: ObjectiveWeightSet,
-    scales: ObjectiveScaleSummary,
-) -> float:
-    control_cost_delta = detail.sample.best_control_cost - detail.sample.baseline_control_cost
-    return float(
-        weight_set.transport * detail.sample.transport_gain / scales.transport_scale
-        + weight_set.noise_action * detail.sample.noise_action_reduction / scales.noise_action_scale
-        + weight_set.leakage * detail.sample.noise_leakage_reduction / scales.leakage_scale
-        - weight_set.control_cost * control_cost_delta / scales.control_cost_scale
+def minmax_normalize_values(
+    values: dict[str, float],
+    *,
+    higher_is_better: bool = True,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    numeric = np.array(list(values.values()), dtype=np.float64)
+    lo = float(np.min(numeric))
+    hi = float(np.max(numeric))
+    if hi - lo <= eps:
+        return {name: 0.5 for name in values}
+    normalized: dict[str, float] = {}
+    for name, value in values.items():
+        score = float((value - lo) / (hi - lo))
+        normalized[name] = score if higher_is_better else float(1.0 - score)
+    return normalized
+
+
+def normalized_metric_vectors(results: list[ParetoRunResult]) -> dict[str, dict[str, float]]:
+    metrics = {
+        "detector_gain_norm": minmax_normalize_values(
+            {result.name: result.mean_detector_success_gain for result in results},
+            higher_is_better=True,
+        ),
+        "noise_action_norm": minmax_normalize_values(
+            {result.name: result.mean_noise_action_reduction for result in results},
+            higher_is_better=True,
+        ),
+        "leakage_norm": minmax_normalize_values(
+            {result.name: result.mean_noise_leakage_reduction for result in results},
+            higher_is_better=True,
+        ),
+        "success_rate_norm": minmax_normalize_values(
+            {result.name: result.success_rate for result in results},
+            higher_is_better=True,
+        ),
+        "control_cost_norm": minmax_normalize_values(
+            {result.name: result.mean_best_control_cost for result in results},
+            higher_is_better=False,
+        ),
+        "saturated_knobs_norm": minmax_normalize_values(
+            {result.name: result.mean_saturated_knobs for result in results},
+            higher_is_better=False,
+        ),
+    }
+    vectors: dict[str, dict[str, float]] = {}
+    for result in results:
+        vectors[result.name] = {metric: values[result.name] for metric, values in metrics.items()}
+    return vectors
+
+
+def normalized_balanced_scores(results: list[ParetoRunResult]) -> dict[str, float]:
+    vectors = normalized_metric_vectors(results)
+    return {
+        name: float(np.mean(list(metric_values.values()), dtype=np.float64))
+        for name, metric_values in vectors.items()
+    }
+
+
+def bootstrap_mean_ci(
+    values: np.ndarray,
+    *,
+    n_bootstrap: int,
+    ci: float,
+    seed: int,
+) -> tuple[float, float]:
+    array = np.asarray(values, dtype=np.float64)
+    if array.size == 0:
+        raise ValueError("values must be non-empty")
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty(n_bootstrap, dtype=np.float64)
+    for index in range(n_bootstrap):
+        sample = rng.choice(array, size=array.size, replace=True)
+        boot_means[index] = float(np.mean(sample))
+    alpha = (1.0 - ci) / 2.0
+    return (
+        float(np.quantile(boot_means, alpha)),
+        float(np.quantile(boot_means, 1.0 - alpha)),
     )
 
 
-def summarize_knob_profiles(
-    preset_name: str,
-    details: list[DetailedMotorEnsembleSample],
+def compute_preset_confidence_intervals(
+    per_preset_sample_rows: dict[str, list[dict[str, float | object]]],
+    *,
+    metrics: list[str],
+    n_bootstrap: int,
+    ci: float,
+    seed: int,
+) -> list[PresetCI]:
+    intervals: list[PresetCI] = []
+    for preset_index, preset_name in enumerate(sorted(per_preset_sample_rows)):
+        rows = per_preset_sample_rows[preset_name]
+        if not rows:
+            raise ValueError(f"preset {preset_name} has no sample rows")
+        for metric_index, metric in enumerate(metrics):
+            values = np.array([float(row[metric]) for row in rows], dtype=np.float64)
+            ci_low, ci_high = bootstrap_mean_ci(
+                values,
+                n_bootstrap=n_bootstrap,
+                ci=ci,
+                seed=seed + preset_index * 101 + metric_index,
+            )
+            intervals.append(
+                PresetCI(
+                    preset_name=preset_name,
+                    metric=metric,
+                    mean=float(np.mean(values)),
+                    median=float(np.median(values)),
+                    ci_low=ci_low,
+                    ci_high=ci_high,
+                )
+            )
+    return intervals
+
+
+def compute_knob_profiles(
+    per_preset_sample_rows: dict[str, list[dict[str, object]]],
+    knob_names: list[str],
     registry,
-) -> list[KnobProfileSummary]:
-    profiles: list[KnobProfileSummary] = []
-    for knob in registry.knobs:
-        values = np.array([detail.best_theta[knob.name] for detail in details], dtype=np.float64)
-        statuses = [knob_bound_statuses(detail.best_theta, registry) for detail in details]
-        knob_status = [
-            next(item for item in status_list if item.name == knob.name)
-            for status_list in statuses
-        ]
+    *,
+    bound_tolerance_fraction: float = 0.02,
+) -> list[KnobProfile]:
+    profiles: list[KnobProfile] = []
+    knob_lookup = {knob.name: knob for knob in registry.knobs}
+    for knob_name in knob_names:
+        if knob_name not in knob_lookup:
+            raise ValueError(f"unknown knob in profile request: {knob_name}")
+
+    for preset_name, rows in per_preset_sample_rows.items():
+        if not rows:
+            raise ValueError(f"preset {preset_name} has no sample rows")
+        mean_theta: dict[str, float] = {}
+        std_theta: dict[str, float] = {}
+        fraction_at_upper_bound: dict[str, float] = {}
+        fraction_at_lower_bound: dict[str, float] = {}
+        for knob_name in knob_names:
+            values: list[float] = []
+            upper_hits: list[float] = []
+            lower_hits: list[float] = []
+            knob = knob_lookup[knob_name]
+            span = float(knob.max_value - knob.min_value)
+            tolerance = bound_tolerance_fraction * span
+            for row in rows:
+                theta = row.get("best_theta")
+                if not isinstance(theta, dict) or knob_name not in theta:
+                    raise ValueError(f"missing best_theta[{knob_name}] for preset {preset_name}")
+                value = float(theta[knob_name])
+                values.append(value)
+                upper_hits.append(1.0 if value >= knob.max_value - tolerance else 0.0)
+                lower_hits.append(1.0 if value <= knob.min_value + tolerance else 0.0)
+            mean_theta[knob_name] = float(np.mean(values))
+            std_theta[knob_name] = float(np.std(values))
+            fraction_at_upper_bound[knob_name] = float(np.mean(upper_hits))
+            fraction_at_lower_bound[knob_name] = float(np.mean(lower_hits))
         profiles.append(
-            KnobProfileSummary(
+            KnobProfile(
                 preset_name=preset_name,
-                knob=knob.name,
-                mean_value=float(np.mean(values)),
-                mean_abs_value=float(np.mean(np.abs(values))),
-                saturation_rate=float(np.mean([1.0 if item.at_lower_bound or item.at_upper_bound else 0.0 for item in knob_status])),
-                near_bound_rate=float(np.mean([1.0 if item.near_bound else 0.0 for item in knob_status])),
+                mean_theta=mean_theta,
+                std_theta=std_theta,
+                fraction_at_upper_bound=fraction_at_upper_bound,
+                fraction_at_lower_bound=fraction_at_lower_bound,
             )
         )
     return profiles
 
 
-def _ci_for_metric(
-    preset_name: str,
-    metric: str,
-    values: np.ndarray,
-    *,
-    n_bootstrap: int,
-    seed: int,
-) -> PresetConfidenceInterval:
-    ci_low, ci_high = bootstrap_mean_ci(values, n_bootstrap=n_bootstrap, seed=seed)
-    return PresetConfidenceInterval(
-        preset_name=preset_name,
-        metric=metric,
-        mean=float(np.mean(values)),
-        ci_low=ci_low,
-        ci_high=ci_high,
-        n_bootstrap=n_bootstrap,
-    )
-
-
-def _build_audit_result(
-    summary: ParetoRunResult,
-    weight_set: ObjectiveWeightSet,
-    details: list[DetailedMotorEnsembleSample],
-    registry,
-    scales: ObjectiveScaleSummary,
-    *,
-    n_bootstrap: int,
-    seed: int,
-) -> ParetoAuditRunResult:
-    detector_values = np.array([detail.sample.detector_success_gain for detail in details], dtype=np.float64)
-    noise_values = np.array([detail.sample.noise_action_reduction for detail in details], dtype=np.float64)
-    leakage_values = np.array([detail.sample.noise_leakage_reduction for detail in details], dtype=np.float64)
-    objective_values = np.array([detail.sample.objective_gain for detail in details], dtype=np.float64)
-    normalized_values = np.array(
-        [normalized_objective_gain(detail, weight_set, scales) for detail in details],
-        dtype=np.float64,
-    )
-    control_cost_delta = np.array(
-        [detail.sample.best_control_cost - detail.sample.baseline_control_cost for detail in details],
-        dtype=np.float64,
-    )
-    theta_l2 = np.array(
-        [float(np.linalg.norm(np.array(list(detail.best_theta.values()), dtype=np.float64))) for detail in details],
-        dtype=np.float64,
-    )
-
-    detector_ci = _ci_for_metric(summary.name, "detector_success_gain", detector_values, n_bootstrap=n_bootstrap, seed=seed)
-    noise_ci = _ci_for_metric(summary.name, "noise_action_reduction", noise_values, n_bootstrap=n_bootstrap, seed=seed + 1)
-    leakage_ci = _ci_for_metric(summary.name, "noise_leakage_reduction", leakage_values, n_bootstrap=n_bootstrap, seed=seed + 2)
-    objective_ci = _ci_for_metric(summary.name, "objective_gain", objective_values, n_bootstrap=n_bootstrap, seed=seed + 3)
-    normalized_ci = _ci_for_metric(summary.name, "normalized_objective_gain", normalized_values, n_bootstrap=n_bootstrap, seed=seed + 4)
-
-    return ParetoAuditRunResult(
-        name=summary.name,
-        weights=weight_set,
-        n_samples=summary.n_samples,
-        success_rate=summary.success_rate,
-        mean_detector_success_gain=summary.mean_detector_success_gain,
-        mean_noise_action_reduction=summary.mean_noise_action_reduction,
-        mean_noise_leakage_reduction=summary.mean_noise_leakage_reduction,
-        mean_objective_gain=summary.mean_objective_gain,
-        mean_normalized_objective_gain=float(np.mean(normalized_values)),
-        mean_best_control_cost=summary.mean_best_control_cost,
-        mean_saturated_knobs=summary.mean_saturated_knobs,
-        mean_near_bound_knobs=summary.mean_near_bound_knobs,
-        mean_transport_term_gain=float(np.mean(weight_set.transport * np.array([detail.sample.transport_gain for detail in details], dtype=np.float64))),
-        mean_noise_action_term_gain=float(np.mean(weight_set.noise_action * noise_values)),
-        mean_noise_leakage_term_gain=float(np.mean(weight_set.leakage * leakage_values)),
-        mean_control_cost_penalty=float(np.mean(weight_set.control_cost * control_cost_delta)),
-        detector_gain_ci_low=detector_ci.ci_low,
-        detector_gain_ci_high=detector_ci.ci_high,
-        noise_action_ci_low=noise_ci.ci_low,
-        noise_action_ci_high=noise_ci.ci_high,
-        leakage_ci_low=leakage_ci.ci_low,
-        leakage_ci_high=leakage_ci.ci_high,
-        objective_ci_low=objective_ci.ci_low,
-        objective_ci_high=objective_ci.ci_high,
-        normalized_objective_ci_low=normalized_ci.ci_low,
-        normalized_objective_ci_high=normalized_ci.ci_high,
-        mean_theta_l2=float(np.mean(theta_l2)),
-        knob_profiles=summarize_knob_profiles(summary.name, details, registry),
-    )
-
-
-def pairwise_theta_distance_summary(audit_results: list[ParetoAuditRunResult]) -> tuple[float, float]:
-    if len(audit_results) < 2:
-        return 0.0, 0.0
-    profile_vectors = {
-        result.name: np.array([profile.mean_value for profile in result.knob_profiles], dtype=np.float64)
-        for result in audit_results
+def regime_metric_vectors(results: list[ParetoRunResult]) -> dict[str, np.ndarray]:
+    normalized = normalized_metric_vectors(results)
+    return {
+        name: np.array(
+            [
+                metrics["detector_gain_norm"],
+                metrics["noise_action_norm"],
+                metrics["leakage_norm"],
+                metrics["success_rate_norm"],
+                metrics["control_cost_norm"],
+                metrics["saturated_knobs_norm"],
+            ],
+            dtype=np.float64,
+        )
+        for name, metrics in normalized.items()
     }
-    distances: list[float] = []
-    names = list(profile_vectors)
+
+
+def pairwise_regime_distances(vectors: dict[str, np.ndarray]) -> list[RegimeDistance]:
+    names = sorted(vectors)
+    distances: list[RegimeDistance] = []
     for index, left_name in enumerate(names):
         for right_name in names[index + 1 :]:
-            distances.append(float(np.linalg.norm(profile_vectors[left_name] - profile_vectors[right_name])))
-    return float(np.mean(distances)), float(np.min(distances))
+            distance = float(np.linalg.norm(vectors[left_name] - vectors[right_name]))
+            distances.append(RegimeDistance(left_name, right_name, distance))
+    return distances
 
 
-def assess_regime_shape(
-    audit_results: list[ParetoAuditRunResult],
-    scale_summary: ObjectiveScaleSummary,
-    mean_pairwise_theta_distance: float,
-) -> tuple[bool, str]:
-    detector_span = float(
-        max(result.mean_detector_success_gain for result in audit_results)
-        - min(result.mean_detector_success_gain for result in audit_results)
-    )
-    noise_span = float(
-        max(result.mean_noise_action_reduction for result in audit_results)
-        - min(result.mean_noise_action_reduction for result in audit_results)
-    )
-    normalization_recommended = bool(scale_summary.raw_scale_ratio >= 4.0 or detector_span < 0.0025)
-    if detector_span < 0.0025 and mean_pairwise_theta_distance < 0.08:
-        assessment = "constraint_shaped_family"
-    elif noise_span > 0.0010 or mean_pairwise_theta_distance >= 0.08:
-        assessment = "partially_separated_regimes"
-    else:
-        assessment = "mildly_separated_family"
-    return normalization_recommended, assessment
+def summarize_regime_distances(distances: list[RegimeDistance]) -> dict[str, object]:
+    if not distances:
+        raise ValueError("distances must be non-empty")
+    closest = min(distances, key=lambda item: item.distance)
+    furthest = max(distances, key=lambda item: item.distance)
+    return {
+        "mean_pairwise_regime_distance": float(np.mean([item.distance for item in distances], dtype=np.float64)),
+        "closest_presets": (closest.preset_a, closest.preset_b),
+        "most_separated_presets": (furthest.preset_a, furthest.preset_b),
+    }
 
 
-def run_transition_motor_pareto_audit(
-    config: dict[str, Any],
-) -> tuple[list[ParetoAuditRunResult], ParetoStressAuditSummary, Path, Path, Path]:
-    parsed = transition_motor_pareto_audit_from_dict(config)
-    motor_config = parsed.motor_config
-    grid = motor_config.grid
-    registry = motor_config.knob_registry
-    basis = make_control_basis(grid)
+def is_compressed_frontier(
+    mean_pairwise_distance: float,
+    *,
+    threshold: float = 0.15,
+) -> bool:
+    return bool(mean_pairwise_distance < threshold)
 
-    fabrication_profiles = sample_fabrication_disorder_profiles(
-        int(parsed.fabrication_disorder["n_samples"]),
-        grid.n_sites,
-        float(parsed.fabrication_disorder["onsite_sigma"]),
-        float(parsed.fabrication_disorder["correlation_length_sites"]),
-        int(parsed.fabrication_disorder["seed"]),
-    )
 
-    detailed_by_preset: dict[str, list[DetailedMotorEnsembleSample]] = {}
-    raw_results: list[ParetoRunResult] = []
-    for weight_set in parsed.weight_sets:
-        preset_motor = replace(
-            motor_config,
-            objective_weights={
-                "transport": weight_set.transport,
-                "noise_action": weight_set.noise_action,
-                "leakage": weight_set.leakage,
-                "control_cost": weight_set.control_cost,
-            },
-        )
-        details: list[DetailedMotorEnsembleSample] = []
-        for sample_id, onsite_profile in enumerate(fabrication_profiles):
-            noise_profiles = sample_phase_noise_profiles(
-                int(parsed.phase_noise["n_profiles_per_sample"]),
-                grid.n_sites,
-                float(parsed.phase_noise["profile_sigma"]),
-                float(parsed.phase_noise["correlation_length_sites"]),
-                int(parsed.phase_noise["seed"]) + sample_id,
-            )
-            detail = run_single_motor_ensemble_sample_detailed(
-                grid,
-                registry,
-                basis,
-                onsite_profile,
-                noise_profiles,
-                preset_motor,
-                parsed.success_criteria,
-            )
-            details.append(replace(detail, sample=replace(detail.sample, sample_id=sample_id)))
-        detailed_by_preset[weight_set.name] = details
-        raw_results.append(
-            ParetoRunResult(
-                name=weight_set.name,
-                weights=weight_set,
-                n_samples=len(details),
-                success_rate=float(np.mean([1.0 if detail.sample.success else 0.0 for detail in details], dtype=np.float64)),
-                detector_win_rate=float(np.mean([1.0 if detail.sample.detector_success_gain > 0.0 else 0.0 for detail in details], dtype=np.float64)),
-                noise_action_win_rate=float(np.mean([1.0 if detail.sample.noise_action_reduction > 0.0 else 0.0 for detail in details], dtype=np.float64)),
-                leakage_win_rate=float(np.mean([1.0 if detail.sample.noise_leakage_reduction > 0.0 else 0.0 for detail in details], dtype=np.float64)),
-                objective_win_rate=float(np.mean([1.0 if detail.sample.objective_gain > 0.0 else 0.0 for detail in details], dtype=np.float64)),
-                mean_detector_success_gain=float(np.mean([detail.sample.detector_success_gain for detail in details])),
-                median_detector_success_gain=float(np.median([detail.sample.detector_success_gain for detail in details])),
-                mean_noise_action_reduction=float(np.mean([detail.sample.noise_action_reduction for detail in details])),
-                median_noise_action_reduction=float(np.median([detail.sample.noise_action_reduction for detail in details])),
-                mean_noise_leakage_reduction=float(np.mean([detail.sample.noise_leakage_reduction for detail in details])),
-                median_noise_leakage_reduction=float(np.median([detail.sample.noise_leakage_reduction for detail in details])),
-                mean_objective_gain=float(np.mean([detail.sample.objective_gain for detail in details])),
-                median_objective_gain=float(np.median([detail.sample.objective_gain for detail in details])),
-                mean_best_control_cost=float(np.mean([detail.sample.best_control_cost for detail in details])),
-                mean_saturated_knobs=float(np.mean([detail.sample.saturated_knobs for detail in details])),
-                mean_near_bound_knobs=float(np.mean([detail.sample.near_bound_knobs for detail in details])),
-            )
-        )
+def _dominant_component_overall(component_scales: list[ObjectiveComponentScale]) -> tuple[str, bool]:
+    aggregates = {
+        "detector": float(np.mean([abs(item.mean_detector_component) for item in component_scales], dtype=np.float64)),
+        "noise_action": float(np.mean([abs(item.mean_noise_action_component) for item in component_scales], dtype=np.float64)),
+        "leakage": float(np.mean([abs(item.mean_leakage_component) for item in component_scales], dtype=np.float64)),
+        "control_cost": float(np.mean([abs(item.mean_control_cost_component) for item in component_scales], dtype=np.float64)),
+    }
+    dominant = max(aggregates.items(), key=lambda item: item[1])[0]
+    nonzero = [value for value in aggregates.values() if value > 1.0e-12]
+    scaling_issue = False
+    if len(nonzero) >= 2:
+        scaling_issue = max(nonzero) / min(nonzero) >= 4.0
+    return dominant, scaling_issue
 
-    scale_summary = compute_objective_scale_summary(detailed_by_preset)
-    audit_results = [
-        _build_audit_result(
-            summary,
-            summary.weights,
-            detailed_by_preset[summary.name],
-            registry,
-            scale_summary,
-            n_bootstrap=parsed.bootstrap_n,
-            seed=parsed.bootstrap_seed + index * 17,
-        )
-        for index, summary in enumerate(raw_results)
+
+def run_pareto_audit(config_path: str | Path) -> ParetoAuditResult:
+    audit_config = load_audit_config(config_path)
+    base_config = _load_base_pareto_config(audit_config)
+    merged_config = merge_base_and_stress_weight_sets(base_config, audit_config)
+
+    base_names = [str(item["name"]) for item in list(base_config["transition_motor_pareto"]["weight_sets"])]
+    stress_names = [str(item["name"]) for item in list(audit_config["transition_motor_pareto_audit"]["stress_weight_sets"])]
+
+    results, _, per_preset_sample_rows = run_pareto_weight_sweep_with_samples(merged_config)
+    registry = knob_registry_from_dicts(list(merged_config["transition_motor_pareto"]["knobs"]))
+    knob_names = registry.names()
+
+    component_scales = [compute_component_scale(result) for result in results]
+    normalized_scores = normalized_balanced_scores(results)
+    best_normalized_score_name = max(normalized_scores.items(), key=lambda item: item[1])[0]
+
+    bootstrap_block = dict(audit_config["transition_motor_pareto_audit"]["bootstrap"])
+    ci_metrics = [
+        "detector_success_gain",
+        "noise_action_reduction",
+        "noise_leakage_reduction",
+        "objective_gain",
     ]
-
-    marked = mark_pareto_front(
-        [
-            ParetoRunResult(
-                name=result.name,
-                weights=result.weights,
-                n_samples=result.n_samples,
-                success_rate=result.success_rate,
-                detector_win_rate=0.0,
-                noise_action_win_rate=0.0,
-                leakage_win_rate=0.0,
-                objective_win_rate=0.0,
-                mean_detector_success_gain=result.mean_detector_success_gain,
-                median_detector_success_gain=result.mean_detector_success_gain,
-                mean_noise_action_reduction=result.mean_noise_action_reduction,
-                median_noise_action_reduction=result.mean_noise_action_reduction,
-                mean_noise_leakage_reduction=result.mean_noise_leakage_reduction,
-                median_noise_leakage_reduction=result.mean_noise_leakage_reduction,
-                mean_objective_gain=result.mean_objective_gain,
-                median_objective_gain=result.mean_objective_gain,
-                mean_best_control_cost=result.mean_best_control_cost,
-                mean_saturated_knobs=result.mean_saturated_knobs,
-                mean_near_bound_knobs=result.mean_near_bound_knobs,
-            )
-            for result in audit_results
-        ],
-        maximize=parsed.maximize,
-        minimize=parsed.minimize,
+    confidence_intervals = compute_preset_confidence_intervals(
+        per_preset_sample_rows,
+        metrics=ci_metrics,
+        n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+        ci=float(bootstrap_block["ci"]),
+        seed=int(bootstrap_block["seed"]),
     )
-    pareto_lookup = {item.name: item.is_pareto_optimal for item in marked}
-    final_results = [replace(result, is_pareto_optimal=pareto_lookup[result.name]) for result in audit_results]
+    knob_profiles = compute_knob_profiles(per_preset_sample_rows, knob_names, registry)
+    regime_distances = pairwise_regime_distances(regime_metric_vectors(results))
+    regime_summary = summarize_regime_distances(regime_distances)
+    dominant_component_overall, component_scaling_issue = _dominant_component_overall(component_scales)
+    compressed = is_compressed_frontier(float(regime_summary["mean_pairwise_regime_distance"]))
 
-    mean_pairwise_theta_distance, min_pairwise_theta_distance = pairwise_theta_distance_summary(final_results)
-    normalization_recommended, regime_assessment = assess_regime_shape(
-        final_results,
-        scale_summary,
-        mean_pairwise_theta_distance,
+    summary = ParetoAuditSummary(
+        n_presets=len(results),
+        base_preset_names=base_names,
+        stress_preset_names=stress_names,
+        dominant_component_overall=dominant_component_overall,
+        component_scaling_issue=component_scaling_issue,
+        mean_pairwise_regime_distance=float(regime_summary["mean_pairwise_regime_distance"]),
+        closest_presets=tuple(regime_summary["closest_presets"]),
+        most_separated_presets=tuple(regime_summary["most_separated_presets"]),
+        compressed_frontier=compressed,
     )
-    summary = ParetoStressAuditSummary(
-        n_weight_sets=len(final_results),
-        n_samples_per_weight_set=final_results[0].n_samples if final_results else 0,
-        pareto_optimal_names=[result.name for result in final_results if result.is_pareto_optimal],
-        best_detector_name=max(final_results, key=lambda item: item.mean_detector_success_gain).name,
-        best_noise_action_name=max(final_results, key=lambda item: item.mean_noise_action_reduction).name,
-        best_leakage_name=max(final_results, key=lambda item: item.mean_noise_leakage_reduction).name,
-        best_cost_name=min(final_results, key=lambda item: item.mean_best_control_cost).name,
-        best_normalized_name=max(final_results, key=lambda item: item.mean_normalized_objective_gain).name,
-        normalization_recommended=normalization_recommended,
-        regime_assessment=regime_assessment,
-        mean_pairwise_theta_distance=mean_pairwise_theta_distance,
-        min_pairwise_theta_distance=min_pairwise_theta_distance,
-        objective_scale_summary=scale_summary,
+    return ParetoAuditResult(
+        pareto_results=results,
+        component_scales=component_scales,
+        normalized_scores=normalized_scores,
+        confidence_intervals=confidence_intervals,
+        knob_profiles=knob_profiles,
+        regime_distances=regime_distances,
+        summary=summary,
+        best_normalized_score_name=best_normalized_score_name,
+        n_samples_per_preset=results[0].n_samples if results else 0,
+        bootstrap_n=int(bootstrap_block["n_bootstrap"]),
+        bootstrap_ci=float(bootstrap_block["ci"]),
+        csv_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["csv_path"]),
+        summary_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["summary_path"]),
+        plot_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["plot_path"]),
     )
 
-    csv_path = write_pareto_audit_csv(parsed.outputs["csv_path"], final_results)
-    summary_path = write_pareto_audit_summary_json(parsed.outputs["summary_path"], final_results, summary)
-    plot_path = plot_pareto_audit(final_results, parsed.outputs["plot_path"])
-    return final_results, summary, csv_path, summary_path, plot_path
 
-
-def write_pareto_audit_csv(path: str | Path, results: list[ParetoAuditRunResult]) -> Path:
+def write_pareto_audit_csv(
+    path: str | Path,
+    audit_result: ParetoAuditResult,
+) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    knob_names = sorted({profile.knob for result in results for profile in result.knob_profiles})
-    fieldnames = [
-        "name",
-        "transport",
-        "noise_action",
-        "leakage",
-        "control_cost_weight",
-        "n_samples",
-        "success_rate",
-        "mean_detector_success_gain",
-        "mean_noise_action_reduction",
-        "mean_noise_leakage_reduction",
-        "mean_objective_gain",
-        "mean_normalized_objective_gain",
-        "mean_best_control_cost",
-        "mean_saturated_knobs",
-        "mean_near_bound_knobs",
-        "mean_transport_term_gain",
-        "mean_noise_action_term_gain",
-        "mean_noise_leakage_term_gain",
-        "mean_control_cost_penalty",
-        "detector_gain_ci_low",
-        "detector_gain_ci_high",
-        "noise_action_ci_low",
-        "noise_action_ci_high",
-        "leakage_ci_low",
-        "leakage_ci_high",
-        "objective_ci_low",
-        "objective_ci_high",
-        "normalized_objective_ci_low",
-        "normalized_objective_ci_high",
-        "mean_theta_l2",
-        "is_pareto_optimal",
-    ]
-    for knob_name in knob_names:
-        fieldnames.extend(
-            [
-                f"{knob_name}_mean_value",
-                f"{knob_name}_mean_abs_value",
-                f"{knob_name}_saturation_rate",
-                f"{knob_name}_near_bound_rate",
-            ]
-        )
-
-    with output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for result in results:
-            row = {
+    component_lookup = {item.preset_name: item for item in audit_result.component_scales}
+    rows = []
+    for result in audit_result.pareto_results:
+        component = component_lookup[result.name]
+        rows.append(
+            {
                 "name": result.name,
-                "transport": result.weights.transport,
-                "noise_action": result.weights.noise_action,
-                "leakage": result.weights.leakage,
-                "control_cost_weight": result.weights.control_cost,
-                "n_samples": result.n_samples,
                 "success_rate": result.success_rate,
                 "mean_detector_success_gain": result.mean_detector_success_gain,
                 "mean_noise_action_reduction": result.mean_noise_action_reduction,
                 "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
-                "mean_objective_gain": result.mean_objective_gain,
-                "mean_normalized_objective_gain": result.mean_normalized_objective_gain,
                 "mean_best_control_cost": result.mean_best_control_cost,
                 "mean_saturated_knobs": result.mean_saturated_knobs,
-                "mean_near_bound_knobs": result.mean_near_bound_knobs,
-                "mean_transport_term_gain": result.mean_transport_term_gain,
-                "mean_noise_action_term_gain": result.mean_noise_action_term_gain,
-                "mean_noise_leakage_term_gain": result.mean_noise_leakage_term_gain,
-                "mean_control_cost_penalty": result.mean_control_cost_penalty,
-                "detector_gain_ci_low": result.detector_gain_ci_low,
-                "detector_gain_ci_high": result.detector_gain_ci_high,
-                "noise_action_ci_low": result.noise_action_ci_low,
-                "noise_action_ci_high": result.noise_action_ci_high,
-                "leakage_ci_low": result.leakage_ci_low,
-                "leakage_ci_high": result.leakage_ci_high,
-                "objective_ci_low": result.objective_ci_low,
-                "objective_ci_high": result.objective_ci_high,
-                "normalized_objective_ci_low": result.normalized_objective_ci_low,
-                "normalized_objective_ci_high": result.normalized_objective_ci_high,
-                "mean_theta_l2": result.mean_theta_l2,
-                "is_pareto_optimal": result.is_pareto_optimal,
+                "pareto_optimal": result.is_pareto_optimal,
+                "normalized_balanced_score": audit_result.normalized_scores[result.name],
+                "dominant_component": component.dominant_component,
+                "detector_to_noise_ratio": component.detector_to_noise_ratio,
+                "detector_to_leakage_ratio": component.detector_to_leakage_ratio,
             }
-            profile_lookup = {profile.knob: profile for profile in result.knob_profiles}
-            for knob_name in knob_names:
-                profile = profile_lookup[knob_name]
-                row[f"{knob_name}_mean_value"] = profile.mean_value
-                row[f"{knob_name}_mean_abs_value"] = profile.mean_abs_value
-                row[f"{knob_name}_saturation_rate"] = profile.saturation_rate
-                row[f"{knob_name}_near_bound_rate"] = profile.near_bound_rate
-            writer.writerow(row)
+        )
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
     return output
 
 
 def write_pareto_audit_summary_json(
     path: str | Path,
-    results: list[ParetoAuditRunResult],
-    summary: ParetoStressAuditSummary,
+    audit_result: ParetoAuditResult,
 ) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "results": [{**asdict(result), "weights": asdict(result.weights)} for result in results],
-        "summary": asdict(summary),
+        "summary": asdict(audit_result.summary),
+        "component_scales": [asdict(item) for item in audit_result.component_scales],
+        "normalized_scores": audit_result.normalized_scores,
+        "confidence_intervals": [asdict(item) for item in audit_result.confidence_intervals],
+        "knob_profiles": [asdict(item) for item in audit_result.knob_profiles],
+        "regime_distances": [asdict(item) for item in audit_result.regime_distances],
+        "best_normalized_score_name": audit_result.best_normalized_score_name,
+        "n_samples_per_preset": audit_result.n_samples_per_preset,
+        "bootstrap_n": audit_result.bootstrap_n,
+        "bootstrap_ci": audit_result.bootstrap_ci,
     }
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return output
 
 
-def plot_pareto_audit(results: list[ParetoAuditRunResult], output_path: str | Path) -> Path:
+def plot_pareto_audit(
+    audit_result: ParetoAuditResult,
+    output_path: str | Path,
+) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
-    fig.suptitle("Synthetic Transition Motor Pareto Stress Audit", fontsize=13)
+    results = audit_result.pareto_results
+    base_names = set(audit_result.summary.base_preset_names)
+    stress_names = set(audit_result.summary.stress_preset_names)
+    component_lookup = {item.preset_name: item for item in audit_result.component_scales}
+    knob_lookup = {item.preset_name: item for item in audit_result.knob_profiles}
+    knob_names = list(audit_result.knob_profiles[0].mean_theta.keys())
 
-    knob_names = [profile.knob for profile in results[0].knob_profiles]
-    theta_heatmap = np.array(
-        [
-            [next(profile.mean_abs_value for profile in result.knob_profiles if profile.knob == knob) for knob in knob_names]
-            for result in results
-        ],
-        dtype=np.float64,
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Synthetic Transition Motor Pareto Audit", fontsize=13)
 
     for result in results:
+        is_stress = result.name in stress_names
+        color = "#d1495b" if is_stress else "#2a6f97"
         marker = "D" if result.is_pareto_optimal else "o"
-        axes[0, 0].errorbar(
-            result.mean_detector_success_gain,
-            result.mean_noise_action_reduction,
-            xerr=[[result.mean_detector_success_gain - result.detector_gain_ci_low], [result.detector_gain_ci_high - result.mean_detector_success_gain]],
-            yerr=[[result.mean_noise_action_reduction - result.noise_action_ci_low], [result.noise_action_ci_high - result.mean_noise_action_reduction]],
-            fmt=marker,
-            capsize=3,
-        )
+        axes[0, 0].scatter(result.mean_detector_success_gain, result.mean_noise_action_reduction, color=color, marker=marker, s=85)
         axes[0, 0].text(result.mean_detector_success_gain, result.mean_noise_action_reduction, result.name, fontsize=8)
-        axes[0, 1].scatter(result.mean_noise_leakage_reduction, result.mean_best_control_cost, marker=marker, s=90)
-        axes[0, 1].text(result.mean_noise_leakage_reduction, result.mean_best_control_cost, result.name, fontsize=8)
+        axes[0, 1].scatter(result.mean_detector_success_gain, result.mean_noise_leakage_reduction, color=color, marker=marker, s=85)
+        axes[0, 1].text(result.mean_detector_success_gain, result.mean_noise_leakage_reduction, result.name, fontsize=8)
 
     axes[0, 0].set_title("Detector Gain vs Noise-Action Reduction")
     axes[0, 0].set_xlabel("mean_detector_success_gain")
@@ -689,27 +567,32 @@ def plot_pareto_audit(results: list[ParetoAuditRunResult], output_path: str | Pa
     axes[0, 0].axvline(0.0, color="black", linestyle="--", linewidth=1.0)
     axes[0, 0].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
 
-    axes[0, 1].set_title("Leakage Reduction vs Control Cost")
-    axes[0, 1].set_xlabel("mean_noise_leakage_reduction")
-    axes[0, 1].set_ylabel("mean_best_control_cost")
+    axes[0, 1].set_title("Detector Gain vs Leakage Reduction")
+    axes[0, 1].set_xlabel("mean_detector_success_gain")
+    axes[0, 1].set_ylabel("mean_noise_leakage_reduction")
     axes[0, 1].axvline(0.0, color="black", linestyle="--", linewidth=1.0)
+    axes[0, 1].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
 
-    names = [result.name for result in results]
+    heatmap = np.array(
+        [[knob_lookup[result.name].mean_theta[knob_name] for knob_name in knob_names] for result in results],
+        dtype=np.float64,
+    )
+    image = axes[1, 0].imshow(heatmap, aspect="auto", cmap="coolwarm")
+    axes[1, 0].set_title("Knob-Profile Heatmap (mean theta)")
+    axes[1, 0].set_xticks(np.arange(len(knob_names)), knob_names, rotation=30, ha="right")
+    axes[1, 0].set_yticks(np.arange(len(results)), [result.name for result in results])
+    fig.colorbar(image, ax=axes[1, 0], fraction=0.046, pad=0.04)
+
     indices = np.arange(len(results))
-    normalized_means = np.array([result.mean_normalized_objective_gain for result in results], dtype=np.float64)
-    normalized_err_low = normalized_means - np.array([result.normalized_objective_ci_low for result in results], dtype=np.float64)
-    normalized_err_high = np.array([result.normalized_objective_ci_high for result in results], dtype=np.float64) - normalized_means
-    axes[1, 0].bar(indices, normalized_means, color="#5c7aea")
-    axes[1, 0].errorbar(indices, normalized_means, yerr=np.vstack([normalized_err_low, normalized_err_high]), fmt="none", ecolor="black", capsize=3)
-    axes[1, 0].set_title("Normalized Objective Gain")
-    axes[1, 0].set_xticks(indices, names, rotation=30, ha="right")
-    axes[1, 0].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
-
-    image = axes[1, 1].imshow(theta_heatmap, aspect="auto", cmap="viridis")
-    axes[1, 1].set_title("Mean |theta| by Preset and Knob")
-    axes[1, 1].set_xticks(np.arange(len(knob_names)), knob_names, rotation=30, ha="right")
-    axes[1, 1].set_yticks(np.arange(len(names)), names)
-    fig.colorbar(image, ax=axes[1, 1], fraction=0.046, pad=0.04)
+    width = 0.2
+    axes[1, 1].bar(indices - 1.5 * width, [component_lookup[result.name].mean_detector_component for result in results], width=width, label="detector", color="#2a9d8f")
+    axes[1, 1].bar(indices - 0.5 * width, [component_lookup[result.name].mean_noise_action_component for result in results], width=width, label="noise", color="#e76f51")
+    axes[1, 1].bar(indices + 0.5 * width, [component_lookup[result.name].mean_leakage_component for result in results], width=width, label="leakage", color="#f4a261")
+    axes[1, 1].bar(indices + 1.5 * width, [component_lookup[result.name].mean_control_cost_component for result in results], width=width, label="cost", color="#6d597a")
+    axes[1, 1].set_title("Objective Component Dominance")
+    axes[1, 1].set_xticks(indices, [result.name for result in results], rotation=30, ha="right")
+    axes[1, 1].axhline(0.0, color="black", linewidth=1.0)
+    axes[1, 1].legend(fontsize=8)
 
     fig.tight_layout()
     fig.savefig(output, dpi=180)

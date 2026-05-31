@@ -57,7 +57,12 @@ from hardware.motor_pareto import (
     write_pareto_csv,
     write_pareto_summary_json,
 )
-from hardware.motor_pareto_audit import run_transition_motor_pareto_audit
+from hardware.motor_pareto_audit import (
+    run_pareto_audit,
+    write_pareto_audit_csv,
+    write_pareto_audit_summary_json,
+    plot_pareto_audit,
+)
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -1249,51 +1254,75 @@ def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
     return 0
 
 
-def run_transition_motor_pareto_audit_mode(config: dict[str, Any]) -> int:
-    results, summary, csv_path, summary_path, plot_path = run_transition_motor_pareto_audit(config)
+def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
+    audit_result = run_pareto_audit(config_path)
+    csv_path = write_pareto_audit_csv(str(audit_result.csv_path), audit_result)
+    summary_path = write_pareto_audit_summary_json(str(audit_result.summary_path), audit_result)
+    plot_path = plot_pareto_audit(audit_result, str(audit_result.plot_path))
 
-    print("Transition Motor Pareto Stress Audit")
-    print(f"n_weight_sets = {summary.n_weight_sets}")
-    print(f"n_samples_per_weight_set = {summary.n_samples_per_weight_set}")
-    print(f"pareto_optimal_names = {summary.pareto_optimal_names}")
-    print(f"best_detector_name = {summary.best_detector_name}")
-    print(f"best_noise_action_name = {summary.best_noise_action_name}")
-    print(f"best_leakage_name = {summary.best_leakage_name}")
-    print(f"best_cost_name = {summary.best_cost_name}")
-    print(f"best_normalized_name = {summary.best_normalized_name}")
-    print(f"normalization_recommended = {str(summary.normalization_recommended).lower()}")
-    print(f"regime_assessment = {summary.regime_assessment}")
-    print(
-        "objective_scale_summary = "
-        f"{{'transport_scale': {summary.objective_scale_summary.transport_scale:.6f}, "
-        f"'noise_action_scale': {summary.objective_scale_summary.noise_action_scale:.6f}, "
-        f"'leakage_scale': {summary.objective_scale_summary.leakage_scale:.6f}, "
-        f"'control_cost_scale': {summary.objective_scale_summary.control_cost_scale:.6f}, "
-        f"'raw_scale_ratio': {summary.objective_scale_summary.raw_scale_ratio:.6f}}}"
-    )
-    print(f"mean_pairwise_theta_distance = {summary.mean_pairwise_theta_distance:.6f}")
-    print(f"min_pairwise_theta_distance = {summary.min_pairwise_theta_distance:.6f}")
+    detector_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "detector_success_gain"
+    }
+    noise_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "noise_action_reduction"
+    }
+    leakage_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "noise_leakage_reduction"
+    }
+    component_lookup = {item.preset_name: item for item in audit_result.component_scales}
+    knob_lookup = {item.preset_name: item for item in audit_result.knob_profiles}
+
+    print("Transition Motor Pareto Audit")
+    print(f"n_presets = {audit_result.summary.n_presets}")
+    print(f"base_preset_names = {audit_result.summary.base_preset_names}")
+    print(f"stress_preset_names = {audit_result.summary.stress_preset_names}")
+    print(f"dominant_component_overall = {audit_result.summary.dominant_component_overall}")
+    print(f"component_scaling_issue = {str(audit_result.summary.component_scaling_issue).lower()}")
+    print(f"mean_pairwise_regime_distance = {audit_result.summary.mean_pairwise_regime_distance:.6f}")
+    print(f"closest_presets = {audit_result.summary.closest_presets}")
+    print(f"most_separated_presets = {audit_result.summary.most_separated_presets}")
+    print(f"compressed_frontier = {str(audit_result.summary.compressed_frontier).lower()}")
+    print(f"best_normalized_score_name = {audit_result.best_normalized_score_name}")
     print(f"csv_path = {csv_path}")
     print(f"summary_path = {summary_path}")
     print(f"plot_path = {plot_path}")
-    for result in results:
-        top_knobs = sorted(result.knob_profiles, key=lambda item: item.mean_abs_value, reverse=True)[:2]
+    print("Component scale:")
+    for result in audit_result.pareto_results:
+        component = component_lookup[result.name]
         print(
-            f"{result.name} = "
-            f"{{'success_rate': {result.success_rate:.6f}, "
-            f"'mean_detector_success_gain': {result.mean_detector_success_gain:.6f}, "
-            f"'mean_noise_action_reduction': {result.mean_noise_action_reduction:.6f}, "
-            f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
-            f"'mean_normalized_objective_gain': {result.mean_normalized_objective_gain:.6f}, "
-            f"'mean_best_control_cost': {result.mean_best_control_cost:.6f}, "
-            f"'mean_saturated_knobs': {result.mean_saturated_knobs:.6f}, "
-            f"'dominant_knobs': {[item.knob for item in top_knobs]}, "
-            f"'pareto_optimal': {str(result.is_pareto_optimal).lower()}}}"
+            f"{result.name} = {{'dominant_component': '{component.dominant_component}', "
+            f"'detector_to_noise_ratio': {component.detector_to_noise_ratio:.6f}, "
+            f"'detector_to_leakage_ratio': {component.detector_to_leakage_ratio:.6f}}}"
+        )
+    print("Confidence intervals:")
+    print(f"detector_gain_95ci = {detector_ci}")
+    print(f"noise_action_reduction_95ci = {noise_ci}")
+    print(f"leakage_reduction_95ci = {leakage_ci}")
+    print("Knob profiles:")
+    for result in audit_result.pareto_results:
+        profile = knob_lookup[result.name]
+        dominant_knobs = sorted(profile.mean_theta, key=lambda name: abs(profile.mean_theta[name]), reverse=True)[:2]
+        bound_pressure = {
+            name: {
+                "upper": profile.fraction_at_upper_bound[name],
+                "lower": profile.fraction_at_lower_bound[name],
+            }
+            for name in dominant_knobs
+        }
+        print(
+            f"{result.name} = {{'dominant_knobs': {dominant_knobs}, "
+            f"'bound_pressure': {bound_pressure}}}"
         )
     print(
-        "interpretation = This stress audit checks whether the Pareto layer reveals distinct transition-motor "
-        "regimes or mainly a narrow constraint-shaped family. It adds stress presets, normalized objective-gain "
-        "comparison and knob-profile inspection without changing the fixed physical grid or claiming full QEC."
+        "interpretation = This audit determines whether the Pareto sweep exposes genuinely distinct "
+        "transition-motor regimes or a compressed, constraint-shaped frontier dominated by one objective "
+        "component. It is synthetic ensemble analysis, not experimental validation or full QEC."
     )
     return 0
 
@@ -1478,7 +1507,7 @@ def main() -> int:
     if args.command == "transition-motor-pareto":
         return run_transition_motor_pareto_mode(config)
     if args.command == "transition-motor-pareto-audit":
-        return run_transition_motor_pareto_audit_mode(config)
+        return run_transition_motor_pareto_audit_mode(config_path)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":

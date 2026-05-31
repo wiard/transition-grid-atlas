@@ -1,26 +1,35 @@
-# Transition Motor Pareto Stress Audit
+# Transition Motor Pareto Audit
 
 ## Purpose
-Audit whether the current Pareto frontier shows genuinely different transition-motor regimes or mostly a narrow constraint-shaped family.
+Determine whether Pareto presets represent distinct transition-motor operating regimes or a compressed frontier.
 
-## Why
-The first Pareto sweep kept all presets on the frontier and showed only small separations in detector gain, success rate and control pressure. This audit adds stress presets and normalized comparison layers so those trade-offs become easier to inspect.
+## Background
+The first Pareto sweep showed all presets as Pareto-optimal, with small metric differences.
 
-## What it adds
-- extreme detector, noise, leakage and cost presets
-- bootstrap confidence intervals per preset
-- knob-profile summaries per preset
-- objective-term scale analysis
-- a normalized objective-gain comparison for audit purposes
+## Objective component scale
+Explains detector, noise-action, leakage and control-cost component magnitudes and whether one term dominates the objective landscape.
 
-## Objective normalization
-The motor itself still optimizes its configured raw objective. The audit separately computes normalized objective gains from transport gain, noise-action reduction, leakage reduction and control-cost increase so term-scale imbalance becomes visible without changing solver contracts.
+## Normalized scores
+Explains analysis-only min-max normalization. This does not change the motor objective used during optimization; it only makes cross-preset comparison more legible.
 
-## Regime interpretation
-A sweep can remain Pareto-wide when detector gains are clustered, success rates are flat and knob profiles stay close together. That suggests a constraint-shaped family rather than cleanly separated operating regimes.
+## Stress presets
+Explains `ultra_detector`, `ultra_noise`, `ultra_leakage`, `ultra_cost` and `balanced_normalized`.
 
-## Scientific caution
-This is synthetic ensemble analysis on a fixed grid.
-No experimental validation.
-No full QEC.
+## Confidence intervals
+Per-preset bootstrap confidence intervals for detector gain, noise-action reduction, leakage reduction and objective gain.
+
+## Knob profiles
+Mean theta, std theta and bound fractions per preset.
+
+## Regime separation
+Pairwise distances between normalized preset metric vectors reveal whether presets land in similar or genuinely distinct operating regions.
+
+## Interpretation
+Compressed frontier means the current motor and bounds produce similar outcomes across presets.
+Separated regimes mean objective weights genuinely steer different transition-motor behavior.
+
+## Caution
+Synthetic ensemble only.
+Not experimental validation.
+Not full QEC.
 No syndrome extraction or recovery.

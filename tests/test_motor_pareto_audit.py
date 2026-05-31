@@ -2,209 +2,282 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import yaml
 
-from hardware.motor_ensemble import DetailedMotorEnsembleSample, MotorEnsembleSampleResult
-from hardware.motor_pareto import ObjectiveWeightSet
+from hardware.control_knobs import knob_registry_from_dicts
+from hardware.motor_pareto import ObjectiveWeightSet, ParetoRunResult
 from hardware.motor_pareto_audit import (
-    KnobProfileSummary,
-    ParetoAuditRunResult,
-    ParetoStressAuditSummary,
-    compute_objective_scale_summary,
-    normalized_objective_gain,
-    pairwise_theta_distance_summary,
-    run_transition_motor_pareto_audit,
-    summarize_knob_profiles,
-    transition_motor_pareto_audit_from_dict,
+    KnobProfile,
+    ParetoAuditResult,
+    ParetoAuditSummary,
+    ObjectiveComponentScale,
+    compute_component_scale,
+    compute_knob_profiles,
+    compute_objective_components_for_result,
+    compute_preset_confidence_intervals,
+    is_compressed_frontier,
+    load_audit_config,
+    merge_base_and_stress_weight_sets,
+    minmax_normalize_values,
+    normalized_balanced_scores,
+    pairwise_regime_distances,
+    plot_pareto_audit,
+    regime_metric_vectors,
+    run_pareto_audit,
+    summarize_regime_distances,
     write_pareto_audit_csv,
     write_pareto_audit_summary_json,
-    plot_pareto_audit,
 )
-from hardware.objectives import MotorMetrics
 
 
 class MotorParetoAuditTests(unittest.TestCase):
-    def test_scale_summary_and_normalized_gain_are_finite(self) -> None:
-        details = {
-            "a": [self.build_detail(transport_gain=0.04, noise_gain=0.002, leakage_gain=0.001, best_cost=0.03)],
-            "b": [self.build_detail(transport_gain=0.05, noise_gain=0.001, leakage_gain=0.0005, best_cost=0.02)],
+    def test_component_scale_picks_dominant_component(self) -> None:
+        result = self.build_result(
+            "detector_max",
+            transport=3.0,
+            detector=0.05,
+            noise=0.001,
+            leakage=0.0005,
+            cost=0.02,
+        )
+        scale = compute_component_scale(result)
+        self.assertEqual(scale.dominant_component, "detector")
+
+    def test_component_ratios_are_finite_with_zero_components(self) -> None:
+        result = self.build_result(
+            "detector_only",
+            transport=1.0,
+            detector=0.04,
+            noise=0.0,
+            leakage=0.0,
+            cost=0.01,
+        )
+        scale = compute_component_scale(result)
+        self.assertTrue(np.isfinite(scale.detector_to_noise_ratio))
+        self.assertTrue(np.isfinite(scale.detector_to_leakage_ratio))
+
+    def test_minmax_normalize_higher_is_better(self) -> None:
+        normalized = minmax_normalize_values({"a": 1.0, "b": 3.0}, higher_is_better=True)
+        self.assertLess(normalized["a"], normalized["b"])
+
+    def test_minmax_normalize_lower_is_better(self) -> None:
+        normalized = minmax_normalize_values({"a": 1.0, "b": 3.0}, higher_is_better=False)
+        self.assertGreater(normalized["a"], normalized["b"])
+
+    def test_merge_base_and_stress_weight_sets(self) -> None:
+        base = self.build_base_pareto_config()
+        audit = self.build_audit_config_dict()
+        merged = merge_base_and_stress_weight_sets(base, audit)
+        self.assertEqual(
+            [item["name"] for item in merged["transition_motor_pareto"]["weight_sets"]],
+            ["balanced", "noise_suppression", "ultra_detector", "ultra_noise"],
+        )
+        self.assertEqual(
+            [item["name"] for item in base["transition_motor_pareto"]["weight_sets"]],
+            ["balanced", "noise_suppression"],
+        )
+
+    def test_duplicate_preset_names_fail(self) -> None:
+        base = self.build_base_pareto_config()
+        audit = self.build_audit_config_dict()
+        audit["transition_motor_pareto_audit"]["stress_weight_sets"][0]["name"] = "balanced"
+        with self.assertRaises(ValueError):
+            merge_base_and_stress_weight_sets(base, audit)
+
+    def test_bootstrap_ci_is_deterministic(self) -> None:
+        rows = {
+            "balanced": [
+                {"detector_success_gain": 0.01, "noise_action_reduction": 0.001, "noise_leakage_reduction": 0.0, "objective_gain": 0.02},
+                {"detector_success_gain": 0.03, "noise_action_reduction": 0.002, "noise_leakage_reduction": 0.001, "objective_gain": 0.04},
+            ]
         }
-        scales = compute_objective_scale_summary(details)
-        self.assertGreater(scales.transport_scale, 0.0)
-        self.assertGreater(scales.raw_scale_ratio, 0.0)
+        first = compute_preset_confidence_intervals(rows, metrics=["detector_success_gain"], n_bootstrap=200, ci=0.95, seed=7)
+        second = compute_preset_confidence_intervals(rows, metrics=["detector_success_gain"], n_bootstrap=200, ci=0.95, seed=7)
+        self.assertEqual(first, second)
 
-        value = normalized_objective_gain(
-            details["a"][0],
-            ObjectiveWeightSet("balanced", 1.0, 0.5, 0.25, 0.01),
-            scales,
-        )
-        self.assertTrue(np.isfinite(value))
+    def test_knob_profile_summary_computes_mean_std_and_bounds(self) -> None:
+        registry = self.build_registry()
+        rows = {
+            "balanced": [
+                {"best_theta": {"path_coupling_boost": 0.15, "onsite_phase_gradient": 0.05}},
+                {"best_theta": {"path_coupling_boost": 0.15, "onsite_phase_gradient": -0.05}},
+            ]
+        }
+        profiles = compute_knob_profiles(rows, ["path_coupling_boost", "onsite_phase_gradient"], registry)
+        profile = profiles[0]
+        self.assertAlmostEqual(profile.mean_theta["path_coupling_boost"], 0.15)
+        self.assertAlmostEqual(profile.std_theta["onsite_phase_gradient"], 0.05)
+        self.assertAlmostEqual(profile.fraction_at_upper_bound["path_coupling_boost"], 1.0)
 
-    def test_summarize_knob_profiles_tracks_saturation(self) -> None:
-        parsed = transition_motor_pareto_audit_from_dict(self.build_config())
-        registry = parsed.motor_config.knob_registry
-        details = [
-            self.build_detail(best_theta={"path_coupling_boost": 0.15, "onsite_phase_gradient": 0.1}),
-            self.build_detail(best_theta={"path_coupling_boost": 0.15, "onsite_phase_gradient": 0.0}),
+    def test_regime_distances_find_closest_and_furthest(self) -> None:
+        results = [
+            self.build_result("a", detector=0.05, noise=0.001, leakage=0.001, success=0.8, cost=0.02, saturated=1.0),
+            self.build_result("b", detector=0.051, noise=0.0011, leakage=0.0011, success=0.8, cost=0.021, saturated=1.1),
+            self.build_result("c", detector=0.02, noise=0.01, leakage=0.008, success=0.9, cost=0.01, saturated=0.0),
         ]
-        profiles = summarize_knob_profiles("demo", details, registry)
-        by_name = {profile.knob: profile for profile in profiles}
-        self.assertAlmostEqual(by_name["path_coupling_boost"].saturation_rate, 1.0)
-        self.assertGreaterEqual(by_name["onsite_phase_gradient"].near_bound_rate, 0.5)
+        distances = pairwise_regime_distances(regime_metric_vectors(results))
+        summary = summarize_regime_distances(distances)
+        self.assertEqual(summary["closest_presets"], ("a", "b"))
+        self.assertEqual(summary["most_separated_presets"], ("b", "c"))
 
-    def test_pairwise_distance_and_writers(self) -> None:
-        result_a = self.build_audit_result("a", theta_shift=0.02)
-        result_b = self.build_audit_result("b", theta_shift=0.08)
-        mean_distance, min_distance = pairwise_theta_distance_summary([result_a, result_b])
-        self.assertGreater(mean_distance, 0.0)
-        self.assertGreater(min_distance, 0.0)
+    def test_compressed_frontier_threshold(self) -> None:
+        self.assertTrue(is_compressed_frontier(0.10, threshold=0.15))
+        self.assertFalse(is_compressed_frontier(0.20, threshold=0.15))
 
-        summary = ParetoStressAuditSummary(
-            n_weight_sets=2,
-            n_samples_per_weight_set=2,
-            pareto_optimal_names=["a"],
-            best_detector_name="a",
-            best_noise_action_name="b",
-            best_leakage_name="b",
-            best_cost_name="a",
-            best_normalized_name="a",
-            normalization_recommended=True,
-            regime_assessment="constraint_shaped_family",
-            mean_pairwise_theta_distance=mean_distance,
-            min_pairwise_theta_distance=min_distance,
-            objective_scale_summary=compute_objective_scale_summary(
-                {"a": [self.build_detail()], "b": [self.build_detail(transport_gain=0.05)]}
-            ),
-        )
-
+    def test_csv_json_and_plot_writers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = write_pareto_audit_csv(tmp / "audit.csv", [result_a, result_b])
-            json_path = write_pareto_audit_summary_json(tmp / "audit.json", [result_a, result_b], summary)
-            plot_path = plot_pareto_audit([result_a, result_b], tmp / "plot.png")
+            results = [self.build_result("a"), self.build_result("b", detector=0.03, noise=0.004, leakage=0.003)]
+            audit_result = self.build_audit_result(results)
+            csv_path = write_pareto_audit_csv(tmp / "audit.csv", audit_result)
+            json_path = write_pareto_audit_summary_json(tmp / "audit.json", audit_result)
+            plot_path = plot_pareto_audit(audit_result, tmp / "audit.png")
             self.assertTrue(csv_path.exists())
             self.assertTrue(json_path.exists())
             self.assertTrue(plot_path.exists())
 
-    def test_tiny_pareto_audit_runs(self) -> None:
+    def test_tiny_audit_run_works(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            config = self.build_config(
-                csv_path=tmp / "audit.csv",
-                summary_path=tmp / "audit.json",
-                plot_path=tmp / "audit.png",
-            )
-            results, summary, csv_path, summary_path, plot_path = run_transition_motor_pareto_audit(config)
-            self.assertEqual(len(results), 2)
-            self.assertEqual(summary.n_weight_sets, 2)
-            self.assertTrue(csv_path.exists())
-            self.assertTrue(summary_path.exists())
-            self.assertTrue(plot_path.exists())
-            self.assertIn(summary.best_normalized_name, {result.name for result in results})
+            base_path = tmp / "base.yaml"
+            audit_path = tmp / "audit.yaml"
+            base_path.write_text(yaml.safe_dump(self.build_base_pareto_config()), encoding="utf-8")
+            audit_path.write_text(yaml.safe_dump(self.build_audit_config_dict(base_path)), encoding="utf-8")
+            loaded = load_audit_config(audit_path)
+            self.assertIn("transition_motor_pareto_audit", loaded)
+            result = run_pareto_audit(audit_path)
+            self.assertEqual(result.summary.n_presets, 4)
+            self.assertEqual(result.summary.base_preset_names, ["balanced", "noise_suppression"])
+            self.assertEqual(result.summary.stress_preset_names, ["ultra_detector", "ultra_noise"])
 
-    def build_detail(
+    def build_result(
         self,
+        name: str,
         *,
-        transport_gain: float = 0.03,
-        noise_gain: float = 0.001,
-        leakage_gain: float = 0.0005,
-        best_cost: float = 0.02,
-        best_theta: dict[str, float] | None = None,
-    ) -> DetailedMotorEnsembleSample:
-        theta = {
-            "path_coupling_boost": 0.0,
-            "onsite_phase_gradient": 0.0,
-        }
-        if best_theta:
-            theta.update(best_theta)
-        sample = MotorEnsembleSampleResult(
-            sample_id=0,
-            baseline_detector_success=0.70,
-            best_detector_success=0.74,
-            baseline_detector_final=0.50,
-            best_detector_final=0.54,
-            baseline_transport_efficiency=0.70,
-            best_transport_efficiency=0.70 + transport_gain,
-            baseline_noise_action_on_info=0.10,
-            best_noise_action_on_info=0.10 - noise_gain,
-            baseline_noise_leakage=0.05,
-            best_noise_leakage=0.05 - leakage_gain,
-            baseline_control_cost=0.0,
-            best_control_cost=best_cost,
-            baseline_objective=0.60,
-            best_objective=0.60 + transport_gain + noise_gain + leakage_gain - best_cost * 0.01,
-            detector_success_gain=0.04,
-            transport_gain=transport_gain,
-            noise_action_reduction=noise_gain,
-            noise_leakage_reduction=leakage_gain,
-            objective_gain=transport_gain + noise_gain + leakage_gain - best_cost * 0.01,
-            saturated_knobs=1,
-            near_bound_knobs=1,
-            success=True,
-        )
-        baseline_metrics = MotorMetrics(0.70, 0.02, 0.05, 0.10, 0.90, 0.0, 0.60)
-        best_metrics = MotorMetrics(0.70 + transport_gain, 0.02, 0.05 - leakage_gain, 0.10 - noise_gain, 0.90, best_cost, sample.best_objective)
-        return DetailedMotorEnsembleSample(
-            sample=sample,
-            baseline_theta={"path_coupling_boost": 0.0, "onsite_phase_gradient": 0.0},
-            best_theta=theta,
-            baseline_metrics=baseline_metrics,
-            best_metrics=best_metrics,
-        )
-
-    def build_audit_result(self, name: str, *, theta_shift: float) -> ParetoAuditRunResult:
-        knob_profiles = [
-            KnobProfileSummary(name, "path_coupling_boost", theta_shift, theta_shift, 0.5, 0.5),
-            KnobProfileSummary(name, "onsite_phase_gradient", -theta_shift, theta_shift, 0.0, 0.0),
-        ]
-        detector_mean = 0.05 + theta_shift
-        noise_mean = 0.001 + theta_shift * 0.01
-        leakage_mean = 0.0005 + theta_shift * 0.005
-        objective_mean = 0.04 + theta_shift
-        normalized_mean = 0.8 + theta_shift
-        return ParetoAuditRunResult(
+        transport: float = 1.0,
+        noise_action_weight: float = 0.5,
+        leakage_weight: float = 0.25,
+        control_cost_weight: float = 0.01,
+        detector: float = 0.04,
+        noise: float = 0.002,
+        leakage: float = 0.001,
+        success: float = 0.8,
+        cost: float = 0.02,
+        saturated: float = 1.0,
+    ) -> ParetoRunResult:
+        return ParetoRunResult(
             name=name,
-            weights=ObjectiveWeightSet(name, 1.0, 0.5, 0.25, 0.01),
-            n_samples=2,
-            success_rate=0.75,
-            mean_detector_success_gain=detector_mean,
-            mean_noise_action_reduction=noise_mean,
-            mean_noise_leakage_reduction=leakage_mean,
-            mean_objective_gain=objective_mean,
-            mean_normalized_objective_gain=normalized_mean,
-            mean_best_control_cost=0.03 + theta_shift,
-            mean_saturated_knobs=2.0,
-            mean_near_bound_knobs=2.0,
-            mean_transport_term_gain=0.05,
-            mean_noise_action_term_gain=0.002,
-            mean_noise_leakage_term_gain=0.001,
-            mean_control_cost_penalty=0.0003,
-            detector_gain_ci_low=detector_mean - 0.01,
-            detector_gain_ci_high=detector_mean + 0.01,
-            noise_action_ci_low=noise_mean - 0.0003,
-            noise_action_ci_high=noise_mean + 0.0003,
-            leakage_ci_low=leakage_mean - 0.0002,
-            leakage_ci_high=leakage_mean + 0.0002,
-            objective_ci_low=objective_mean - 0.01,
-            objective_ci_high=objective_mean + 0.01,
-            normalized_objective_ci_low=normalized_mean - 0.1,
-            normalized_objective_ci_high=normalized_mean + 0.1,
-            mean_theta_l2=theta_shift,
-            knob_profiles=knob_profiles,
+            weights=ObjectiveWeightSet(name, transport, noise_action_weight, leakage_weight, control_cost_weight),
+            n_samples=3,
+            success_rate=success,
+            detector_win_rate=1.0,
+            noise_action_win_rate=0.8,
+            leakage_win_rate=0.6,
+            objective_win_rate=1.0,
+            mean_detector_success_gain=detector,
+            median_detector_success_gain=detector,
+            mean_noise_action_reduction=noise,
+            median_noise_action_reduction=noise,
+            mean_noise_leakage_reduction=leakage,
+            median_noise_leakage_reduction=leakage,
+            mean_objective_gain=detector + noise + leakage - cost * control_cost_weight,
+            median_objective_gain=detector + noise + leakage - cost * control_cost_weight,
+            mean_best_control_cost=cost,
+            mean_saturated_knobs=saturated,
+            mean_near_bound_knobs=saturated,
             is_pareto_optimal=True,
         )
 
-    def build_config(
-        self,
-        *,
-        csv_path: Path | None = None,
-        summary_path: Path | None = None,
-        plot_path: Path | None = None,
-    ) -> dict[str, object]:
+    def build_registry(self):
+        return knob_registry_from_dicts(
+            [
+                {
+                    "name": "path_coupling_boost",
+                    "family": "coherent_coupling",
+                    "symbol": "a_path",
+                    "basis_name": "target_corridor",
+                    "min_value": -0.15,
+                    "max_value": 0.15,
+                    "default": 0.0,
+                    "units": "relative_edge_scale",
+                    "description": "Path knob",
+                    "hardware_meaning": "Edge boost",
+                },
+                {
+                    "name": "onsite_phase_gradient",
+                    "family": "onsite_phase",
+                    "symbol": "b_grad",
+                    "basis_name": "linear_gradient",
+                    "min_value": -0.10,
+                    "max_value": 0.10,
+                    "default": 0.0,
+                    "units": "normalized_beta_shift",
+                    "description": "Gradient knob",
+                    "hardware_meaning": "Phase gradient",
+                },
+            ]
+        )
+
+    def build_audit_result(self, results: list[ParetoRunResult]) -> ParetoAuditResult:
+        component_scales = [compute_component_scale(result) for result in results]
+        normalized_scores = normalized_balanced_scores(results)
+        knob_profiles = [
+            KnobProfile(
+                preset_name=result.name,
+                mean_theta={"path_coupling_boost": 0.1, "onsite_phase_gradient": 0.05},
+                std_theta={"path_coupling_boost": 0.02, "onsite_phase_gradient": 0.01},
+                fraction_at_upper_bound={"path_coupling_boost": 0.5, "onsite_phase_gradient": 0.0},
+                fraction_at_lower_bound={"path_coupling_boost": 0.0, "onsite_phase_gradient": 0.0},
+            )
+            for result in results
+        ]
+        distances = pairwise_regime_distances(regime_metric_vectors(results))
+        distance_summary = summarize_regime_distances(distances)
+        summary = ParetoAuditSummary(
+            n_presets=len(results),
+            base_preset_names=[results[0].name],
+            stress_preset_names=[result.name for result in results[1:]],
+            dominant_component_overall="detector",
+            component_scaling_issue=True,
+            mean_pairwise_regime_distance=float(distance_summary["mean_pairwise_regime_distance"]),
+            closest_presets=tuple(distance_summary["closest_presets"]),
+            most_separated_presets=tuple(distance_summary["most_separated_presets"]),
+            compressed_frontier=False,
+        )
+        confidence_intervals = [
+            {
+                "preset_name": result.name,
+                "metric": "detector_success_gain",
+                "mean": result.mean_detector_success_gain,
+                "median": result.median_detector_success_gain,
+                "ci_low": result.mean_detector_success_gain - 0.01,
+                "ci_high": result.mean_detector_success_gain + 0.01,
+            }
+            for result in results
+        ]
+        from hardware.motor_pareto_audit import PresetCI
+
+        return ParetoAuditResult(
+            pareto_results=results,
+            component_scales=component_scales,
+            normalized_scores=normalized_scores,
+            confidence_intervals=[PresetCI(**item) for item in confidence_intervals],
+            knob_profiles=knob_profiles,
+            regime_distances=distances,
+            summary=summary,
+            best_normalized_score_name=max(normalized_scores.items(), key=lambda item: item[1])[0],
+            n_samples_per_preset=3,
+            bootstrap_n=200,
+            bootstrap_ci=0.95,
+        )
+
+    def build_base_pareto_config(self) -> dict[str, object]:
         return {
-            "transition_motor_pareto_audit": {
+            "transition_motor_pareto": {
                 "grid": {
                     "n_sites": 6,
                     "edges": [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
@@ -267,20 +340,8 @@ class MotorParetoAuditTests(unittest.TestCase):
                     "min_noise_action_reduction": -1.0e-9,
                 },
                 "weight_sets": [
-                    {
-                        "name": "balanced",
-                        "transport": 1.0,
-                        "noise_action": 0.5,
-                        "leakage": 0.25,
-                        "control_cost": 0.01,
-                    },
-                    {
-                        "name": "noise_extreme",
-                        "transport": 0.3,
-                        "noise_action": 2.0,
-                        "leakage": 0.5,
-                        "control_cost": 0.01,
-                    },
+                    {"name": "balanced", "transport": 1.0, "noise_action": 0.5, "leakage": 0.25, "control_cost": 0.01},
+                    {"name": "noise_suppression", "transport": 0.5, "noise_action": 1.5, "leakage": 0.5, "control_cost": 0.01},
                 ],
                 "pareto": {
                     "maximize": [
@@ -294,14 +355,41 @@ class MotorParetoAuditTests(unittest.TestCase):
                         "mean_saturated_knobs",
                     ],
                 },
-                "audit": {
+                "outputs": {
+                    "csv_path": "outputs/base.csv",
+                    "summary_path": "outputs/base.json",
+                    "plot_path": "results/renders/base.png",
+                },
+            }
+        }
+
+    def build_audit_config_dict(self, base_path: Path | None = None) -> dict[str, object]:
+        return {
+            "transition_motor_pareto_audit": {
+                "base_config": str(base_path or "configs/hardware/transition_motor_pareto_demo.yaml"),
+                "stress_weight_sets": [
+                    {"name": "ultra_detector", "transport": 3.0, "noise_action": 0.0, "leakage": 0.0, "control_cost": 0.005},
+                    {"name": "ultra_noise", "transport": 0.25, "noise_action": 4.0, "leakage": 1.0, "control_cost": 0.01},
+                ],
+                "bootstrap": {
                     "n_bootstrap": 200,
+                    "ci": 0.95,
                     "seed": 11,
                 },
+                "regime_distance": {
+                    "metrics": [
+                        "mean_detector_success_gain",
+                        "mean_noise_action_reduction",
+                        "mean_noise_leakage_reduction",
+                        "success_rate",
+                        "mean_best_control_cost",
+                        "mean_saturated_knobs",
+                    ]
+                },
                 "outputs": {
-                    "csv_path": str(csv_path or Path("outputs/test_pareto_audit.csv")),
-                    "summary_path": str(summary_path or Path("outputs/test_pareto_audit.json")),
-                    "plot_path": str(plot_path or Path("results/renders/test_pareto_audit.png")),
+                    "csv_path": "outputs/transition_motor_pareto_audit.csv",
+                    "summary_path": "outputs/transition_motor_pareto_audit_summary.json",
+                    "plot_path": "results/renders/transition_motor_pareto_audit.png",
                 },
             }
         }
