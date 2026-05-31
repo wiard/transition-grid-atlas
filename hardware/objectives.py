@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from hardware.objective_modes import ObjectiveMode, ObjectiveNormalizationScale, evaluate_objective_mode
 from hardware.subspaces import complement_projector, projector_from_basis, transport_subspace_from_hamiltonian
 from hardware.transition_tuner import FixedGrid, transport_efficiency
 
@@ -19,18 +20,6 @@ class MotorMetrics:
     suppression_score: float
     control_cost: float
     objective: float
-
-
-@dataclass(frozen=True)
-class ObjectiveNormalizationScale:
-    transport: float
-    noise_action: float
-    leakage: float
-    control_cost: float
-
-    def __post_init__(self) -> None:
-        if min(self.transport, self.noise_action, self.leakage, self.control_cost) <= 0.0:
-            raise ValueError("all normalization scales must be positive")
 
 
 ObjectiveNormalizationScales = ObjectiveNormalizationScale
@@ -98,20 +87,18 @@ def motor_objective(
 
 def normalized_motor_objective(
     *,
-    baseline_metrics: MotorMetrics,
-    candidate_metrics: MotorMetrics,
+    transport_efficiency: float,
+    noise_action_on_info: float,
+    noise_leakage: float,
+    control_cost: float,
     weights: dict[str, float],
     normalization_scales: ObjectiveNormalizationScale,
 ) -> float:
-    transport_gain = float(candidate_metrics.transport_efficiency - baseline_metrics.transport_efficiency)
-    noise_action_reduction = float(baseline_metrics.noise_action_on_info - candidate_metrics.noise_action_on_info)
-    leakage_reduction = float(baseline_metrics.noise_leakage - candidate_metrics.noise_leakage)
-    control_cost_increase = float(candidate_metrics.control_cost - baseline_metrics.control_cost)
     return float(
-        float(weights.get("transport", 1.0)) * transport_gain / normalization_scales.transport
-        + float(weights.get("noise_action", 0.0)) * noise_action_reduction / normalization_scales.noise_action
-        + float(weights.get("leakage", 0.0)) * leakage_reduction / normalization_scales.leakage
-        - float(weights.get("control_cost", 0.0)) * control_cost_increase / normalization_scales.control_cost
+        float(weights.get("transport", 1.0)) * float(transport_efficiency) / normalization_scales.transport_scale
+        - float(weights.get("noise_action", 0.0)) * float(noise_action_on_info) / normalization_scales.noise_action_scale
+        - float(weights.get("leakage", 0.0)) * float(noise_leakage) / normalization_scales.leakage_scale
+        - float(weights.get("control_cost", 0.0)) * float(control_cost) / normalization_scales.control_cost_scale
     )
 
 
@@ -122,6 +109,7 @@ def evaluate_motor_metrics(
     theta: dict[str, float],
     times: np.ndarray,
     weights: dict[str, float],
+    objective_mode: ObjectiveMode | None = None,
     *,
     n_modes: int = 2,
 ) -> MotorMetrics:
@@ -135,13 +123,22 @@ def evaluate_motor_metrics(
     noise = noise_metric_decomposition(noise_ops, P_info)
     cost = control_cost(theta)
     suppression = float(np.clip(1.0 - noise["noise_action_on_info"], 0.0, 1.0))
-    objective = motor_objective(
-        transport_efficiency=transport,
-        noise_action_on_info=noise["noise_action_on_info"],
-        noise_leakage=noise["noise_leakage"],
-        control_cost=cost,
-        weights=weights,
-    )
+    if objective_mode is None:
+        objective = motor_objective(
+            transport_efficiency=transport,
+            noise_action_on_info=noise["noise_action_on_info"],
+            noise_leakage=noise["noise_leakage"],
+            control_cost=cost,
+            weights=weights,
+        )
+    else:
+        objective = evaluate_objective_mode(
+            transport_efficiency=transport,
+            noise_action_on_info=noise["noise_action_on_info"],
+            noise_leakage=noise["noise_leakage"],
+            control_cost=cost,
+            mode=objective_mode,
+        )
     return MotorMetrics(
         transport_efficiency=float(np.clip(transport, 0.0, 1.0)),
         noise_internal=float(noise["noise_internal"]),

@@ -134,11 +134,18 @@ class MotorParetoTests(unittest.TestCase):
                         "control_cost": 0.01,
                     },
                     {
-                        "name": "noise_suppression",
-                        "transport": 0.75,
-                        "noise_action": 1.5,
-                        "leakage": 0.5,
-                        "control_cost": 0.01,
+                        "name": "normalized_noise",
+                        "mode": "normalized",
+                        "transport": 1.0,
+                        "noise_action": 2.0,
+                        "leakage": 1.0,
+                        "control_cost": 0.05,
+                        "normalization": {
+                            "transport_scale": 0.05,
+                            "noise_action_scale": 0.002,
+                            "leakage_scale": 0.001,
+                            "control_cost_scale": 0.04,
+                        },
                     },
                 ],
                 "pareto": {
@@ -169,11 +176,27 @@ class MotorParetoTests(unittest.TestCase):
         loaded = load_weight_sets(
             {
                 "weight_sets": [
-                    {"name": "one", "transport": 1.0, "noise_action": 0.5, "leakage": 0.1, "control_cost": 0.01}
+                    {"name": "one", "transport": 1.0, "noise_action": 0.5, "leakage": 0.1, "control_cost": 0.01},
+                    {
+                        "name": "two",
+                        "mode": "normalized",
+                        "transport": 1.0,
+                        "noise_action": 1.0,
+                        "leakage": 0.5,
+                        "control_cost": 0.05,
+                        "normalization": {
+                            "transport_scale": 0.05,
+                            "noise_action_scale": 0.002,
+                            "leakage_scale": 0.001,
+                            "control_cost_scale": 0.04,
+                        },
+                    },
                 ]
             }
         )
-        self.assertEqual(len(loaded), 1)
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded[1].mode, "normalized")
+        self.assertIsNotNone(loaded[1].normalization)
 
     def test_dominance_and_pareto_front(self):
         a = self.build_result("a", detector=0.2, noise=0.2, leakage=0.1, success=0.9, cost=0.1, saturated=1.0)

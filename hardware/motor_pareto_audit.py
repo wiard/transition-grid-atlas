@@ -159,6 +159,21 @@ def merge_base_and_stress_weight_sets(base_config: dict[str, Any], audit_config:
 
 
 def compute_objective_components_for_result(result: ParetoRunResult) -> dict[str, float]:
+    if result.objective_mode_type in {"normalized", "calibrated"} and result.normalization is not None:
+        return {
+            "detector_component": float(
+                result.weights.transport * result.mean_detector_success_gain / result.normalization.transport_scale
+            ),
+            "noise_action_component": float(
+                -result.weights.noise_action * result.mean_noise_action_reduction / result.normalization.noise_action_scale
+            ),
+            "leakage_component": float(
+                -result.weights.leakage * result.mean_noise_leakage_reduction / result.normalization.leakage_scale
+            ),
+            "control_cost_component": float(
+                -result.weights.control_cost * result.mean_best_control_cost / result.normalization.control_cost_scale
+            ),
+        }
     return {
         "detector_component": float(result.weights.transport * result.mean_detector_success_gain),
         "noise_action_component": float(-result.weights.noise_action * result.mean_noise_action_reduction),
@@ -493,6 +508,15 @@ def write_pareto_audit_csv(
         rows.append(
             {
                 "name": result.name,
+                "mode": result.objective_mode_type,
+                "normalization_scales": None
+                if result.normalization is None
+                else {
+                    "transport_scale": result.normalization.transport_scale,
+                    "noise_action_scale": result.normalization.noise_action_scale,
+                    "leakage_scale": result.normalization.leakage_scale,
+                    "control_cost_scale": result.normalization.control_cost_scale,
+                },
                 "success_rate": result.success_rate,
                 "mean_detector_success_gain": result.mean_detector_success_gain,
                 "mean_noise_action_reduction": result.mean_noise_action_reduction,

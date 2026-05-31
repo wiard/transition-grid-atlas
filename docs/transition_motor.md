@@ -49,9 +49,9 @@ The transition motor now supports three objective interpretations:
 
 - `raw`: optimize the legacy scalar objective directly from absolute transport,
   noise-action, leakage and control cost.
-- `normalized`: optimize gain and reduction terms relative to the default knob
-  state, divided by explicit normalization scales so detector gain does not
-  silently dominate smaller noise/leakage terms.
+- `normalized`: divide absolute transport, noise-action, leakage and control
+  cost by calibration scales before applying weights, so detector terms do not
+  silently dominate by numerical magnitude.
 - `calibrated`: use the normalized scoring path with audit-informed scales and
   weights chosen from prior synthetic Pareto studies.
 
@@ -63,16 +63,19 @@ only change how the optimizer scores candidate controls.
 An objective mode registry lets the operator select named motor regimes without
 rewriting YAML weights by hand. The normalized demo registry exposes:
 
-- `raw_mode`
-- `normalized_mode`
-- `calibrated_mode`
+- `raw_detector_max`
+- `raw_balanced`
+- `normalized_balanced`
+- `normalized_noise`
+- `normalized_leakage_guard`
+- `normalized_cost_sensitive`
 
 The active mode can be selected in config or via:
 
 ```bash
 python run.py transition-motor \
   --config configs/hardware/transition_motor_normalized_demo.yaml \
-  --objective-mode calibrated_mode
+  --objective-mode normalized_cost_sensitive
 ```
 
 ## Sensitivity atlas

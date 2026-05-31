@@ -9,27 +9,39 @@ normalized multi-metric optimizer.
 ## Modes
 
 - `raw`
-  Preserves the legacy scalar objective over absolute transport, noise-action,
-  leakage and control cost.
+  Uses unscaled detector, noise-action, leakage and control-cost components.
 - `normalized`
-  Scores gains and reductions relative to the default knob state, divided by
-  normalization scales so detector output no longer dominates by numerical
+  Divides each absolute objective component by a calibration scale before
+  applying weights, so detector terms no longer dominate by numerical
   magnitude alone.
 - `calibrated`
-  Uses the same normalized scoring path, but is intended for audit-derived
-  scales and tuned weights anchored to prior synthetic Pareto studies.
+  Uses the same normalized scoring path, but is reserved for scales estimated
+  from larger synthetic ensembles, high-fidelity simulations or measured
+  hardware data.
 
 ## Normalization scales
 
-`normalization_scales` define the numerical footing of:
+`normalization` defines the numerical footing of:
 
-- transport gain
-- noise-action reduction
-- leakage reduction
-- control-cost increase
+- transport efficiency
+- noise-action on information modes
+- leakage
+- control cost
 
 These scales do not change the Hamiltonian model or the fixed photonic grid.
 They only change how the optimizer scores candidate controls.
+
+## Operating modes
+
+- `raw_detector_max`
+- `raw_balanced`
+- `normalized_balanced`
+- `normalized_noise`
+- `normalized_leakage_guard`
+- `normalized_cost_sensitive`
+
+These are operating-mode templates. Their scales are calibration parameters,
+not universal physical constants.
 
 ## Config pattern
 
@@ -47,16 +59,16 @@ python run.py transition-motor \
   --config configs/hardware/transition_motor_normalized_demo.yaml
 ```
 
-Override the selected registry mode:
+Override the selected normalized objective mode:
 
 ```bash
 python run.py transition-motor \
   --config configs/hardware/transition_motor_normalized_demo.yaml \
-  --objective-mode calibrated_mode
+  --objective-mode normalized_cost_sensitive
 ```
 
 ## Scientific caution
 
-This is hardware-native error suppression through fixed-grid Hamiltonian
-control. It is not experimental validation and it does not implement full
-quantum error correction.
+This is synthetic Hamiltonian-control tuning on a fixed photonic grid. It is
+not experimental validation and it does not implement full quantum error
+correction.

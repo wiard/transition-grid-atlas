@@ -32,6 +32,18 @@ transition_motor_pareto_audit:
       leakage: 1.0
       control_cost: 1.0
 
+    - name: normalized_noise_strong
+      mode: normalized
+      transport: 1.0
+      noise_action: 3.0
+      leakage: 1.0
+      control_cost: 0.05
+      normalization:
+        transport_scale: 0.05
+        noise_action_scale: 0.002
+        leakage_scale: 0.001
+        control_cost_scale: 0.04
+
   bootstrap:
     n_bootstrap: 3000
     ci: 0.95

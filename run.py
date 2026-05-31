@@ -50,7 +50,8 @@ from hardware.ensemble_statistics import (
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
-from hardware.objectives import evaluate_motor_metrics, normalized_motor_objective
+from hardware.objective_modes import ObjectiveNormalizationScale, default_objective_modes
+from hardware.objectives import evaluate_motor_metrics
 from hardware.motor_pareto import (
     plot_pareto_results,
     run_pareto_weight_sweep,
@@ -1026,9 +1027,39 @@ def run_transition_motor_mode(
     if operating_mode:
         config = dict(config)
         block = dict(config["transition_motor"])
-        objective_block = dict(block.get("objective", {}))
-        objective_block["selected_mode"] = operating_mode
-        block["objective"] = objective_block
+        if "objective" in block:
+            objective_block = dict(block.get("objective", {}))
+            objective_block["selected_mode"] = operating_mode
+            block["objective"] = objective_block
+        elif "objective_mode" in block:
+            objective_mode_block = dict(block["objective_mode"])
+            base_scales: ObjectiveNormalizationScale | None = None
+            if "normalization" in objective_mode_block:
+                norm = dict(objective_mode_block["normalization"])
+                base_scales = ObjectiveNormalizationScale(
+                    transport_scale=float(norm["transport_scale"]),
+                    noise_action_scale=float(norm["noise_action_scale"]),
+                    leakage_scale=float(norm["leakage_scale"]),
+                    control_cost_scale=float(norm["control_cost_scale"]),
+                )
+            candidates = {mode.name: mode for mode in default_objective_modes(base_scales)}
+            if operating_mode not in candidates:
+                raise ValueError(f"unknown objective mode override: {operating_mode}")
+            selected = candidates[operating_mode]
+            objective_mode_block = {
+                "name": selected.name,
+                "mode": selected.mode,
+                "weights": selected.weights_dict(),
+                "description": selected.description,
+            }
+            if selected.normalization is not None:
+                objective_mode_block["normalization"] = {
+                    "transport_scale": selected.normalization.transport_scale,
+                    "noise_action_scale": selected.normalization.noise_action_scale,
+                    "leakage_scale": selected.normalization.leakage_scale,
+                    "control_cost_scale": selected.normalization.control_cost_scale,
+                }
+            block["objective_mode"] = objective_mode_block
         config["transition_motor"] = block
     motor_config, outputs = transition_motor_config_from_dict(config)
     grid = motor_config.grid
@@ -1047,39 +1078,20 @@ def run_transition_motor_mode(
     sensitivity_path = None
     if report_sensitivity or outputs.get("sensitivity_csv_path"):
         times = np.linspace(motor_config.time_min, motor_config.time_max, motor_config.n_time_samples, dtype=np.float64)
-        baseline_H = build_control_hamiltonian(H0, grid, result.baseline_theta, basis, registry)
-        baseline_raw_metrics = evaluate_motor_metrics(
-            baseline_H,
-            motor_config.noise_profiles,
-            grid,
-            result.baseline_theta,
-            times,
-            motor_config.objective_weights,
-            n_modes=motor_config.n_transport_modes,
-        )
 
         def metrics_fn(theta: dict[str, float]):
             H = build_control_hamiltonian(H0, grid, theta, basis, registry)
-            from dataclasses import replace
 
-            raw_metrics = evaluate_motor_metrics(
+            return evaluate_motor_metrics(
                 H,
                 motor_config.noise_profiles,
                 grid,
                 theta,
                 times,
                 motor_config.objective_weights,
+                objective_mode=motor_config.objective_mode,
                 n_modes=motor_config.n_transport_modes,
             )
-            if motor_config.objective_mode not in {"normalized", "calibrated"}:
-                return raw_metrics
-            objective = normalized_motor_objective(
-                baseline_metrics=baseline_raw_metrics,
-                candidate_metrics=raw_metrics,
-                weights=motor_config.objective_weights,
-                normalization_scales=motor_config.normalization_scales,
-            )
-            return replace(raw_metrics, objective=objective)
 
         entries = compute_sensitivity_matrix(
             metrics_fn,
@@ -1103,26 +1115,37 @@ def run_transition_motor_mode(
     print(f"fixed_grid_sites = {grid.n_sites}")
     print(f"fixed_grid_edges = {len(grid.edges)}")
     print(f"active_knobs = {registry.names()}")
-    print(f"objective_mode = {motor_config.objective_mode}")
-    print(f"selected_objective_mode = {motor_config.selected_objective_mode or 'legacy_objective_weights'}")
-    if motor_config.objective_mode_registry is not None and motor_config.selected_objective_mode is not None:
+    mode_name = motor_config.objective_mode.name if motor_config.objective_mode is not None else "legacy_objective_weights"
+    mode_type = motor_config.objective_mode.mode if motor_config.objective_mode is not None else "raw"
+    print(f"objective_mode = {mode_name}")
+    print(f"objective_mode_type = {mode_type}")
+    if motor_config.objective_mode is not None:
         print(
             "selected_objective_mode_description = "
-            f"{motor_config.objective_mode_registry.get(motor_config.selected_objective_mode).description}"
+            f"{motor_config.objective_mode.description}"
         )
     print(
         "available_objective_modes = "
         f"{motor_config.objective_mode_registry.names() if motor_config.objective_mode_registry is not None else ['legacy_objective_weights']}"
     )
     print(f"objective_weights = {motor_config.objective_weights}")
-    if motor_config.normalization_scales is not None:
+    if motor_config.objective_mode is not None and motor_config.objective_mode.normalization is not None:
+        print(
+            "objective_normalization = "
+            f"{{'transport_scale': {motor_config.objective_mode.normalization.transport_scale:.6f}, "
+            f"'noise_action_scale': {motor_config.objective_mode.normalization.noise_action_scale:.6f}, "
+            f"'leakage_scale': {motor_config.objective_mode.normalization.leakage_scale:.6f}, "
+            f"'control_cost_scale': {motor_config.objective_mode.normalization.control_cost_scale:.6f}}}"
+        )
         print(
             "normalization_scales = "
-            f"{{'transport': {motor_config.normalization_scales.transport:.6f}, "
-            f"'noise_action': {motor_config.normalization_scales.noise_action:.6f}, "
-            f"'leakage': {motor_config.normalization_scales.leakage:.6f}, "
-            f"'control_cost': {motor_config.normalization_scales.control_cost:.6f}}}"
+            f"{{'transport_scale': {motor_config.objective_mode.normalization.transport_scale:.6f}, "
+            f"'noise_action_scale': {motor_config.objective_mode.normalization.noise_action_scale:.6f}, "
+            f"'leakage_scale': {motor_config.objective_mode.normalization.leakage_scale:.6f}, "
+            f"'control_cost_scale': {motor_config.objective_mode.normalization.control_cost_scale:.6f}}}"
         )
+    else:
+        print("objective_normalization = none")
     print(f"baseline_transport_efficiency = {result.baseline_metrics.transport_efficiency:.6f}")
     print(f"best_transport_efficiency = {result.best_metrics.transport_efficiency:.6f}")
     print(f"baseline_noise_action_on_info = {result.baseline_metrics.noise_action_on_info:.6f}")
@@ -1286,7 +1309,8 @@ def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
     for result in results:
         print(
             f"{result.name} = "
-            f"{{'success_rate': {result.success_rate:.6f}, "
+            f"{{'mode': '{result.objective_mode_type}', "
+            f"'success_rate': {result.success_rate:.6f}, "
             f"'mean_detector_success_gain': {result.mean_detector_success_gain:.6f}, "
             f"'mean_noise_action_reduction': {result.mean_noise_action_reduction:.6f}, "
             f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
@@ -1344,7 +1368,9 @@ def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
     for result in audit_result.pareto_results:
         component = component_lookup[result.name]
         print(
-            f"{result.name} = {{'dominant_component': '{component.dominant_component}', "
+            f"{result.name} = {{'mode': '{result.objective_mode_type}', "
+            f"'normalization_scales': {None if result.normalization is None else {'transport_scale': result.normalization.transport_scale, 'noise_action_scale': result.normalization.noise_action_scale, 'leakage_scale': result.normalization.leakage_scale, 'control_cost_scale': result.normalization.control_cost_scale}}, "
+            f"'dominant_component': '{component.dominant_component}', "
             f"'detector_to_noise_ratio': {component.detector_to_noise_ratio:.6f}, "
             f"'detector_to_leakage_ratio': {component.detector_to_leakage_ratio:.6f}}}"
         )

@@ -97,9 +97,7 @@ def transition_motor_ensemble_from_dict(data: dict[str, Any]) -> TransitionMotor
         grid=grid,
         knob_registry=registry,
         objective_weights={str(k): float(v) for k, v in dict(block["objective_weights"]).items()},
-        objective_mode="raw",
-        normalization_scales=None,
-        selected_objective_mode=None,
+        objective_mode=None,
         objective_mode_registry=None,
         noise_profiles=[],
         time_min=float(optimizer["time_min"]),
@@ -276,6 +274,7 @@ def run_single_motor_ensemble_sample_detailed(
         baseline_theta,
         times,
         motor_config.objective_weights,
+        objective_mode=motor_config.objective_mode,
         n_modes=motor_config.n_transport_modes,
     )
 

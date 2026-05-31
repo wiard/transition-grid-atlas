@@ -5,7 +5,6 @@ import unittest
 import numpy as np
 
 from hardware.objectives import (
-    MotorMetrics,
     ObjectiveNormalizationScale,
     control_cost,
     evaluate_motor_metrics,
@@ -79,57 +78,47 @@ class ObjectiveTests(unittest.TestCase):
         self.assertNotEqual(objective_a, objective_b)
         self.assertGreater(control_cost({"a": 0.2, "b": 0.2}), control_cost({"a": 0.1, "b": 0.1}))
 
-    def test_normalized_objective_is_zero_at_baseline(self):
-        baseline = MotorMetrics(
-            transport_efficiency=0.75,
-            noise_internal=0.10,
-            noise_leakage=0.08,
-            noise_action_on_info=0.18,
-            suppression_score=0.82,
-            control_cost=0.00,
-            objective=0.0,
-        )
+    def test_normalized_objective_scales_absolute_components(self):
         objective = normalized_motor_objective(
-            baseline_metrics=baseline,
-            candidate_metrics=baseline,
+            transport_efficiency=0.75,
+            noise_action_on_info=0.18,
+            noise_leakage=0.08,
+            control_cost=0.00,
             weights={"transport": 1.0, "noise_action": 1.0, "leakage": 1.0, "control_cost": 1.0},
             normalization_scales=ObjectiveNormalizationScale(
-                transport=0.05,
-                noise_action=0.0025,
-                leakage=0.0010,
-                control_cost=0.04,
+                transport_scale=0.05,
+                noise_action_scale=0.0025,
+                leakage_scale=0.0010,
+                control_cost_scale=0.04,
             ),
         )
-        self.assertAlmostEqual(objective, 0.0, places=12)
+        self.assertAlmostEqual(objective, 0.75 / 0.05 - 0.18 / 0.0025 - 0.08 / 0.0010, places=10)
 
     def test_normalized_objective_rewards_improvement(self):
-        baseline = MotorMetrics(
+        base = normalized_motor_objective(
             transport_efficiency=0.70,
-            noise_internal=0.10,
-            noise_leakage=0.09,
             noise_action_on_info=0.20,
-            suppression_score=0.80,
+            noise_leakage=0.09,
             control_cost=0.00,
-            objective=0.0,
-        )
-        candidate = MotorMetrics(
-            transport_efficiency=0.74,
-            noise_internal=0.09,
-            noise_leakage=0.07,
-            noise_action_on_info=0.18,
-            suppression_score=0.82,
-            control_cost=0.01,
-            objective=0.0,
-        )
-        objective = normalized_motor_objective(
-            baseline_metrics=baseline,
-            candidate_metrics=candidate,
             weights={"transport": 1.0, "noise_action": 1.0, "leakage": 1.0, "control_cost": 0.5},
             normalization_scales=ObjectiveNormalizationScale(
-                transport=0.05,
-                noise_action=0.02,
-                leakage=0.02,
-                control_cost=0.04,
+                transport_scale=0.05,
+                noise_action_scale=0.02,
+                leakage_scale=0.02,
+                control_cost_scale=0.04,
             ),
         )
-        self.assertGreater(objective, 0.0)
+        better = normalized_motor_objective(
+            transport_efficiency=0.74,
+            noise_action_on_info=0.18,
+            noise_leakage=0.07,
+            control_cost=0.01,
+            weights={"transport": 1.0, "noise_action": 1.0, "leakage": 1.0, "control_cost": 0.5},
+            normalization_scales=ObjectiveNormalizationScale(
+                transport_scale=0.05,
+                noise_action_scale=0.02,
+                leakage_scale=0.02,
+                control_cost_scale=0.04,
+            ),
+        )
+        self.assertGreater(better, base)

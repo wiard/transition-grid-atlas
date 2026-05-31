@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
 from hardware.control_basis import ControlBasis, make_control_basis
 from hardware.control_knobs import KnobRegistry, knob_registry_from_dicts
-from hardware.objective_modes import ObjectiveModeKind, ObjectiveModeRegistry, objective_mode_registry_from_dict
+from hardware.objective_modes import (
+    ObjectiveMode,
+    ObjectiveModeRegistry,
+    default_objective_modes,
+    objective_mode_from_config,
+    objective_mode_registry_from_dict,
+)
 from hardware.objectives import (
     MotorMetrics,
-    ObjectiveNormalizationScale,
     evaluate_motor_metrics,
-    normalized_motor_objective,
 )
 from hardware.sensitivity import compute_sensitivity_matrix, top_sensitivities
 from hardware.transition_tuner import FixedGrid, build_base_hamiltonian, fixed_grid_from_dict, noise_operators_from_profiles
@@ -24,9 +28,7 @@ class TransitionMotorConfig:
     grid: FixedGrid
     knob_registry: KnobRegistry
     objective_weights: dict[str, float]
-    objective_mode: ObjectiveModeKind
-    normalization_scales: ObjectiveNormalizationScale | None
-    selected_objective_mode: str | None
+    objective_mode: ObjectiveMode | None
     objective_mode_registry: ObjectiveModeRegistry | None
     noise_profiles: list[np.ndarray]
     time_min: float
@@ -55,50 +57,62 @@ def transition_motor_config_from_dict(data: dict[str, object]) -> tuple[Transiti
     grid = fixed_grid_from_dict(dict(block["grid"]))
     registry = knob_registry_from_dicts(list(block["knobs"]))
     optimizer = dict(block["optimizer"])
-    objective_mode = "raw"
     objective_weights = {str(k): float(v) for k, v in dict(block.get("objective_weights", {})).items()}
-    normalization_scales: ObjectiveNormalizationScale | None = None
-    selected_objective_mode: str | None = None
     objective_mode_registry: ObjectiveModeRegistry | None = None
+    objective_mode = objective_mode_from_config(block)
 
-    if "objective" in block:
+    if objective_mode is not None:
+        scales = objective_mode.normalization
+        default_modes = default_objective_modes(scales)
+        if objective_mode.name not in [mode.name for mode in default_modes]:
+            default_modes = [*default_modes, objective_mode]
+        objective_mode_registry = ObjectiveModeRegistry(
+            modes=tuple(default_modes),
+            default_mode=objective_mode.name,
+        )
+        objective_weights = objective_mode.weights_dict()
+    elif "objective" in block:
         objective_block = dict(block["objective"])
-        selected_objective_mode = str(objective_block.get("selected_mode", "")).strip() or None
-        if "normalization_scales" in objective_block:
-            scales = dict(objective_block["normalization_scales"])
-            normalization_scales = ObjectiveNormalizationScale(
-                transport=float(scales["transport"]),
-                noise_action=float(scales["noise_action"]),
-                leakage=float(scales["leakage"]),
-                control_cost=float(scales["control_cost"]),
-            )
         registry_key = "objective_mode_registry" if "objective_mode_registry" in objective_block else "operating_mode_registry"
         if registry_key in objective_block:
             objective_mode_registry = objective_mode_registry_from_dict(dict(objective_block[registry_key]))
-            resolved_name = selected_objective_mode or objective_mode_registry.default_mode
-            mode = objective_mode_registry.get(resolved_name)
-            selected_objective_mode = mode.name
-            objective_mode = str(mode.mode)
-            objective_weights = mode.weights_dict()
+            selected_name = str(objective_block.get("selected_mode", "")).strip() or objective_mode_registry.default_mode
+            objective_mode = objective_mode_registry.get(selected_name)
+            objective_weights = objective_mode.weights_dict()
         elif "weights" in objective_block:
-            objective_mode = str(objective_block.get("mode", "raw"))
-            objective_weights = {str(k): float(v) for k, v in dict(objective_block["weights"]).items()}
-        elif objective_weights:
-            objective_mode = str(objective_block.get("mode", "raw"))
-    if objective_mode not in {"raw", "normalized", "calibrated"}:
-        raise ValueError("transition-motor objective mode must be 'raw', 'normalized' or 'calibrated'")
-    if objective_mode in {"normalized", "calibrated"} and normalization_scales is None:
-        raise ValueError("normalized or calibrated transition-motor mode requires normalization_scales")
+            objective_mode = ObjectiveMode(
+                name="legacy_objective_block",
+                mode=str(objective_block.get("mode", "raw")),
+                transport_weight=float(dict(objective_block["weights"]).get("transport", 1.0)),
+                noise_action_weight=float(dict(objective_block["weights"]).get("noise_action", 0.0)),
+                leakage_weight=float(dict(objective_block["weights"]).get("leakage", 0.0)),
+                control_cost_weight=float(dict(objective_block["weights"]).get("control_cost", 0.0)),
+                normalization=None if str(objective_block.get("mode", "raw")) == "raw" else None,
+                description="Legacy transition-motor objective block.",
+            )
+            if objective_mode.mode != "raw":
+                raise ValueError("legacy objective block only supports raw mode; use objective_mode for normalized or calibrated runs")
+            objective_weights = objective_mode.weights_dict()
     elif not objective_weights:
         objective_weights = {"transport": 1.0, "noise_action": 0.5, "leakage": 0.25, "control_cost": 0.01}
+
+    if objective_mode is not None and objective_mode_registry is None:
+        scales = objective_mode.normalization
+        default_modes = default_objective_modes(scales)
+        mode_names = [mode.name for mode in default_modes]
+        if objective_mode.name not in mode_names:
+            default_modes = [*default_modes, objective_mode]
+            mode_names = [mode.name for mode in default_modes]
+        objective_mode_registry = ObjectiveModeRegistry(
+            modes=tuple(default_modes),
+            default_mode=objective_mode.name if objective_mode.name in mode_names else "raw_balanced",
+        )
 
     config = TransitionMotorConfig(
         grid=grid,
         knob_registry=registry,
         objective_weights=objective_weights,
         objective_mode=objective_mode,
-        normalization_scales=normalization_scales,
-        selected_objective_mode=selected_objective_mode,
         objective_mode_registry=objective_mode_registry,
         noise_profiles=noise_operators_from_profiles(list(dict(block["noise"])["profiles"])),
         time_min=float(optimizer["time_min"]),
@@ -220,12 +234,10 @@ def random_restart_transition_motor_search(
     registry: KnobRegistry,
     config: TransitionMotorConfig,
 ) -> TransitionMotorResult:
-    objective_mode = str(getattr(config, "objective_mode", "raw"))
-    normalization_scales = getattr(config, "normalization_scales", None)
     times = np.linspace(config.time_min, config.time_max, config.n_time_samples, dtype=np.float64)
     baseline_theta = registry.defaults()
 
-    def raw_metrics(theta: dict[str, float]) -> MotorMetrics:
+    def metrics_fn(theta: dict[str, float]) -> MotorMetrics:
         H = build_control_hamiltonian(H0, grid, theta, basis, registry)
         return evaluate_motor_metrics(
             H,
@@ -234,31 +246,14 @@ def random_restart_transition_motor_search(
             registry.clip_theta(theta),
             times,
             config.objective_weights,
+            objective_mode=config.objective_mode,
             n_modes=config.n_transport_modes,
         )
-
-    baseline_raw_metrics = raw_metrics(baseline_theta)
-
-    def apply_objective_mode(metrics: MotorMetrics) -> MotorMetrics:
-        if objective_mode in {"normalized", "calibrated"}:
-            if normalization_scales is None:
-                raise ValueError("normalized or calibrated objective mode requires normalization_scales")
-            objective = normalized_motor_objective(
-                baseline_metrics=baseline_raw_metrics,
-                candidate_metrics=metrics,
-                weights=config.objective_weights,
-                normalization_scales=normalization_scales,
-            )
-            return replace(metrics, objective=objective)
-        return metrics
-
-    def metrics_fn(theta: dict[str, float]) -> MotorMetrics:
-        return apply_objective_mode(raw_metrics(theta))
 
     def objective_fn(theta: dict[str, float]) -> float:
         return float(metrics_fn(theta).objective)
 
-    baseline_metrics = apply_objective_mode(baseline_raw_metrics)
+    baseline_metrics = metrics_fn(baseline_theta)
     best_theta = dict(baseline_theta)
     best_metrics = baseline_metrics
     rng = np.random.default_rng(config.seed)

@@ -6,7 +6,8 @@ import numpy as np
 
 from hardware.control_basis import make_control_basis
 from hardware.control_knobs import ControlKnob, KnobRegistry
-from hardware.objectives import ObjectiveNormalizationScale, evaluate_motor_metrics
+from hardware.objective_modes import ObjectiveMode, ObjectiveNormalizationScale
+from hardware.objectives import evaluate_motor_metrics
 from hardware.transition_motor import (
     build_control_hamiltonian,
     finite_difference_gradient,
@@ -98,6 +99,7 @@ class TransitionMotorTests(unittest.TestCase):
 
         class Config:
             objective_weights = {"transport": 1.0, "noise_action": 0.5, "leakage": 0.25, "control_cost": 0.01}
+            objective_mode = None
             time_min = 0.0
             time_max = 12.0
             n_time_samples = 40
@@ -112,7 +114,7 @@ class TransitionMotorTests(unittest.TestCase):
         self.assertGreaterEqual(result.best_metrics.objective + 1.0e-12, result.baseline_metrics.objective)
         registry.validate_theta(result.best_theta)
 
-    def test_transition_motor_config_resolves_objective_mode_registry(self):
+    def test_transition_motor_config_loads_new_objective_mode_block(self):
         config, _ = transition_motor_config_from_dict(
             {
                 "transition_motor": {
@@ -138,37 +140,22 @@ class TransitionMotorTests(unittest.TestCase):
                         }
                     ],
                     "noise": {"profiles": [[0.0, 0.2, 0.1, 0.0]]},
-                    "objective": {
-                        "selected_mode": "noise_mode",
-                        "normalization_scales": {
-                            "transport": 0.05,
-                            "noise_action": 0.0025,
-                            "leakage": 0.0010,
-                            "control_cost": 0.04,
+                    "objective_mode": {
+                        "name": "normalized_noise",
+                        "mode": "normalized",
+                        "weights": {
+                            "transport": 1.0,
+                            "noise_action": 1.0,
+                            "leakage": 0.5,
+                            "control_cost": 0.05,
                         },
-                        "objective_mode_registry": {
-                            "default_mode": "detector_mode",
-                            "modes": [
-                                {
-                                    "name": "detector_mode",
-                                    "mode": "normalized",
-                                    "transport": 3.0,
-                                    "noise_action": 0.0,
-                                    "leakage": 0.0,
-                                    "control_cost": 0.005,
-                                    "description": "detector",
-                                },
-                                {
-                                    "name": "noise_mode",
-                                    "mode": "calibrated",
-                                    "transport": 0.25,
-                                    "noise_action": 4.0,
-                                    "leakage": 1.0,
-                                    "control_cost": 0.01,
-                                    "description": "noise",
-                                },
-                            ],
+                        "normalization": {
+                            "transport_scale": 0.05,
+                            "noise_action_scale": 0.002,
+                            "leakage_scale": 0.001,
+                            "control_cost_scale": 0.04,
                         },
+                        "description": "normalized",
                     },
                     "optimizer": {
                         "time_min": 0.0,
@@ -184,22 +171,32 @@ class TransitionMotorTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(config.objective_mode, "calibrated")
-        self.assertEqual(config.selected_objective_mode, "noise_mode")
-        self.assertEqual(config.objective_weights["noise_action"], 4.0)
-        self.assertEqual(config.objective_mode_registry.names(), ["detector_mode", "noise_mode"])
+        self.assertIsNotNone(config.objective_mode)
+        assert config.objective_mode is not None
+        self.assertEqual(config.objective_mode.mode, "normalized")
+        self.assertEqual(config.objective_mode.name, "normalized_noise")
+        self.assertEqual(config.objective_weights["noise_action"], 1.0)
+        self.assertIn("normalized_noise", config.objective_mode_registry.names())
 
     def test_random_restart_search_supports_normalized_objective_mode(self):
         H0, grid, basis, registry, noise_ops, metrics_fn = self.build_metrics_objective()
 
         class Config:
             objective_weights = {"transport": 0.25, "noise_action": 4.0, "leakage": 1.0, "control_cost": 0.01}
-            objective_mode = "normalized"
-            normalization_scales = ObjectiveNormalizationScale(
-                transport=0.05,
-                noise_action=0.0025,
-                leakage=0.0010,
-                control_cost=0.04,
+            objective_mode = ObjectiveMode(
+                name="normalized_noise",
+                mode="normalized",
+                transport_weight=0.25,
+                noise_action_weight=4.0,
+                leakage_weight=1.0,
+                control_cost_weight=0.01,
+                normalization=ObjectiveNormalizationScale(
+                    transport_scale=0.05,
+                    noise_action_scale=0.0025,
+                    leakage_scale=0.0010,
+                    control_cost_scale=0.04,
+                ),
+                description="normalized",
             )
             time_min = 0.0
             time_max = 12.0
@@ -212,6 +209,5 @@ class TransitionMotorTests(unittest.TestCase):
             seed = 42
 
         result = random_restart_transition_motor_search(H0, grid, noise_ops, basis, registry, Config())
-        self.assertAlmostEqual(result.baseline_metrics.objective, 0.0, places=10)
         self.assertGreaterEqual(result.best_metrics.objective + 1.0e-12, result.baseline_metrics.objective)
         registry.validate_theta(result.best_theta)

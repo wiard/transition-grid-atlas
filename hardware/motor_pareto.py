@@ -17,6 +17,7 @@ import numpy as np
 
 from hardware.control_basis import make_control_basis
 from hardware.ensemble_statistics import compute_win_rates
+from hardware.objective_modes import ObjectiveMode, ObjectiveNormalizationScale
 from hardware.motor_ensemble import (
     DetailedMotorEnsembleSample,
     MotorEnsembleSampleResult,
@@ -35,6 +36,9 @@ class ObjectiveWeightSet:
     noise_action: float
     leakage: float
     control_cost: float
+    mode: str = "raw"
+    normalization: ObjectiveNormalizationScale | None = None
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,8 @@ class ParetoRunResult:
     mean_saturated_knobs: float
     mean_near_bound_knobs: float
     is_pareto_optimal: bool = False
+    objective_mode_type: str = "raw"
+    normalization: ObjectiveNormalizationScale | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,22 @@ def validate_weight_set(weight_set: ObjectiveWeightSet) -> None:
         raise ValueError("objective weights must be non-negative")
     if weight_set.transport <= 0.0 and weight_set.noise_action <= 0.0 and weight_set.leakage <= 0.0:
         raise ValueError("at least one performance weight must be positive")
+    if weight_set.mode not in {"raw", "normalized", "calibrated"}:
+        raise ValueError("weight set mode must be 'raw', 'normalized' or 'calibrated'")
+    if weight_set.mode in {"normalized", "calibrated"} and weight_set.normalization is None:
+        raise ValueError("normalized and calibrated weight sets require normalization")
+
+
+def _normalization_from_dict(data: dict[str, Any] | None) -> ObjectiveNormalizationScale | None:
+    if data is None:
+        return None
+    block = dict(data)
+    return ObjectiveNormalizationScale(
+        transport_scale=float(block["transport_scale"]),
+        noise_action_scale=float(block["noise_action_scale"]),
+        leakage_scale=float(block["leakage_scale"]),
+        control_cost_scale=float(block["control_cost_scale"]),
+    )
 
 
 def load_weight_sets(config: dict[str, Any]) -> list[ObjectiveWeightSet]:
@@ -103,6 +125,9 @@ def load_weight_sets(config: dict[str, Any]) -> list[ObjectiveWeightSet]:
             noise_action=float(item["noise_action"]),
             leakage=float(item["leakage"]),
             control_cost=float(item["control_cost"]),
+            mode=str(item.get("mode", "raw")),
+            normalization=_normalization_from_dict(item.get("normalization")),
+            description=str(item.get("description", "")),
         )
         for item in list(config["weight_sets"])
     ]
@@ -261,6 +286,8 @@ def _summarize_samples(name: str, weight_set: ObjectiveWeightSet, samples: list[
     return ParetoRunResult(
         name=name,
         weights=weight_set,
+        objective_mode_type=weight_set.mode,
+        normalization=weight_set.normalization,
         n_samples=len(samples),
         success_rate=float(np.mean([1.0 if sample.success else 0.0 for sample in samples], dtype=np.float64)),
         detector_win_rate=win_rates.detector_win_rate,
@@ -331,6 +358,16 @@ def run_pareto_weight_sweep_with_samples(
     results: list[ParetoRunResult] = []
     per_preset_sample_rows: dict[str, list[dict[str, object]]] = {}
     for weight_set in parsed.weight_sets:
+        mode = ObjectiveMode(
+            name=weight_set.name,
+            mode=weight_set.mode,
+            transport_weight=weight_set.transport,
+            noise_action_weight=weight_set.noise_action,
+            leakage_weight=weight_set.leakage,
+            control_cost_weight=weight_set.control_cost,
+            normalization=weight_set.normalization,
+            description=weight_set.description or f"Pareto preset {weight_set.name}",
+        )
         motor_config = replace(
             base_motor,
             objective_weights={
@@ -339,6 +376,7 @@ def run_pareto_weight_sweep_with_samples(
                 "leakage": weight_set.leakage,
                 "control_cost": weight_set.control_cost,
             },
+            objective_mode=mode,
         )
         samples: list[MotorEnsembleSampleResult] = []
         sample_rows: list[dict[str, object]] = []
@@ -387,10 +425,15 @@ def write_pareto_csv(path: str | Path, results: list[ParetoRunResult]) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "name",
+        "mode",
         "transport",
         "noise_action",
         "leakage",
         "control_cost_weight",
+        "transport_scale",
+        "noise_action_scale",
+        "leakage_scale",
+        "control_cost_scale",
         "n_samples",
         "success_rate",
         "detector_win_rate",
@@ -417,10 +460,15 @@ def write_pareto_csv(path: str | Path, results: list[ParetoRunResult]) -> Path:
             writer.writerow(
                 {
                     "name": result.name,
+                    "mode": result.objective_mode_type,
                     "transport": result.weights.transport,
                     "noise_action": result.weights.noise_action,
                     "leakage": result.weights.leakage,
                     "control_cost_weight": result.weights.control_cost,
+                    "transport_scale": None if result.normalization is None else result.normalization.transport_scale,
+                    "noise_action_scale": None if result.normalization is None else result.normalization.noise_action_scale,
+                    "leakage_scale": None if result.normalization is None else result.normalization.leakage_scale,
+                    "control_cost_scale": None if result.normalization is None else result.normalization.control_cost_scale,
                     "n_samples": result.n_samples,
                     "success_rate": result.success_rate,
                     "detector_win_rate": result.detector_win_rate,
