@@ -13,7 +13,7 @@ import numpy as np
 from hardware.control_basis import ControlBasis, make_control_basis
 from hardware.control_knobs import KnobRegistry, knob_registry_from_dicts
 from hardware.motor_audit import count_saturated_knobs, knob_bound_statuses
-from hardware.objectives import evaluate_motor_metrics
+from hardware.objectives import MotorMetrics, evaluate_motor_metrics
 from hardware.subspaces import diagonal_phase_noise
 from hardware.transition_motor import (
     TransitionMotorConfig,
@@ -57,6 +57,15 @@ class MotorEnsembleSampleResult:
     saturated_knobs: int
     near_bound_knobs: int
     success: bool
+
+
+@dataclass(frozen=True)
+class DetailedMotorEnsembleSample:
+    sample: MotorEnsembleSampleResult
+    baseline_theta: dict[str, float]
+    best_theta: dict[str, float]
+    baseline_metrics: MotorMetrics
+    best_metrics: MotorMetrics
 
 
 @dataclass(frozen=True)
@@ -240,7 +249,7 @@ def _noise_ops_from_profiles(noise_profiles: list[np.ndarray]) -> list[np.ndarra
     return [diagonal_phase_noise(np.asarray(profile, dtype=np.float64)) for profile in noise_profiles]
 
 
-def run_single_motor_ensemble_sample(
+def run_single_motor_ensemble_sample_detailed(
     grid: FixedGrid,
     registry: KnobRegistry,
     basis: ControlBasis,
@@ -313,31 +322,57 @@ def run_single_motor_ensemble_sample(
         and noise_action_reduction >= float(success_criteria["min_noise_action_reduction"])
     )
 
-    return MotorEnsembleSampleResult(
-        sample_id=-1,
-        baseline_detector_success=baseline_detector_success,
-        best_detector_success=best_detector_success,
-        baseline_detector_final=baseline_detector_final,
-        best_detector_final=best_detector_final,
-        baseline_transport_efficiency=float(baseline_metrics.transport_efficiency),
-        best_transport_efficiency=float(motor_result.best_metrics.transport_efficiency),
-        baseline_noise_action_on_info=float(baseline_metrics.noise_action_on_info),
-        best_noise_action_on_info=float(motor_result.best_metrics.noise_action_on_info),
-        baseline_noise_leakage=float(baseline_metrics.noise_leakage),
-        best_noise_leakage=float(motor_result.best_metrics.noise_leakage),
-        baseline_control_cost=float(baseline_metrics.control_cost),
-        best_control_cost=float(motor_result.best_metrics.control_cost),
-        baseline_objective=float(baseline_metrics.objective),
-        best_objective=float(motor_result.best_metrics.objective),
-        detector_success_gain=detector_success_gain,
-        transport_gain=transport_gain,
-        noise_action_reduction=noise_action_reduction,
-        noise_leakage_reduction=noise_leakage_reduction,
-        objective_gain=objective_gain,
-        saturated_knobs=count_saturated_knobs(statuses),
-        near_bound_knobs=sum(1 for item in statuses if item.near_bound),
-        success=success,
+    return DetailedMotorEnsembleSample(
+        sample=MotorEnsembleSampleResult(
+            sample_id=-1,
+            baseline_detector_success=baseline_detector_success,
+            best_detector_success=best_detector_success,
+            baseline_detector_final=baseline_detector_final,
+            best_detector_final=best_detector_final,
+            baseline_transport_efficiency=float(baseline_metrics.transport_efficiency),
+            best_transport_efficiency=float(motor_result.best_metrics.transport_efficiency),
+            baseline_noise_action_on_info=float(baseline_metrics.noise_action_on_info),
+            best_noise_action_on_info=float(motor_result.best_metrics.noise_action_on_info),
+            baseline_noise_leakage=float(baseline_metrics.noise_leakage),
+            best_noise_leakage=float(motor_result.best_metrics.noise_leakage),
+            baseline_control_cost=float(baseline_metrics.control_cost),
+            best_control_cost=float(motor_result.best_metrics.control_cost),
+            baseline_objective=float(baseline_metrics.objective),
+            best_objective=float(motor_result.best_metrics.objective),
+            detector_success_gain=detector_success_gain,
+            transport_gain=transport_gain,
+            noise_action_reduction=noise_action_reduction,
+            noise_leakage_reduction=noise_leakage_reduction,
+            objective_gain=objective_gain,
+            saturated_knobs=count_saturated_knobs(statuses),
+            near_bound_knobs=sum(1 for item in statuses if item.near_bound),
+            success=success,
+        ),
+        baseline_theta=dict(baseline_theta),
+        best_theta=dict(motor_result.best_theta),
+        baseline_metrics=baseline_metrics,
+        best_metrics=motor_result.best_metrics,
     )
+
+
+def run_single_motor_ensemble_sample(
+    grid: FixedGrid,
+    registry: KnobRegistry,
+    basis: ControlBasis,
+    onsite_disorder: np.ndarray,
+    noise_profiles: list[np.ndarray],
+    motor_config: TransitionMotorConfig,
+    success_criteria: dict[str, float],
+) -> MotorEnsembleSampleResult:
+    return run_single_motor_ensemble_sample_detailed(
+        grid,
+        registry,
+        basis,
+        onsite_disorder,
+        noise_profiles,
+        motor_config,
+        success_criteria,
+    ).sample
 
 
 def summarize_motor_ensemble(results: list[MotorEnsembleSampleResult]) -> MotorEnsembleSummary:

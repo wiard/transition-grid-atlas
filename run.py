@@ -57,6 +57,7 @@ from hardware.motor_pareto import (
     write_pareto_csv,
     write_pareto_summary_json,
 )
+from hardware.motor_pareto_audit import run_transition_motor_pareto_audit
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -1248,6 +1249,55 @@ def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_transition_motor_pareto_audit_mode(config: dict[str, Any]) -> int:
+    results, summary, csv_path, summary_path, plot_path = run_transition_motor_pareto_audit(config)
+
+    print("Transition Motor Pareto Stress Audit")
+    print(f"n_weight_sets = {summary.n_weight_sets}")
+    print(f"n_samples_per_weight_set = {summary.n_samples_per_weight_set}")
+    print(f"pareto_optimal_names = {summary.pareto_optimal_names}")
+    print(f"best_detector_name = {summary.best_detector_name}")
+    print(f"best_noise_action_name = {summary.best_noise_action_name}")
+    print(f"best_leakage_name = {summary.best_leakage_name}")
+    print(f"best_cost_name = {summary.best_cost_name}")
+    print(f"best_normalized_name = {summary.best_normalized_name}")
+    print(f"normalization_recommended = {str(summary.normalization_recommended).lower()}")
+    print(f"regime_assessment = {summary.regime_assessment}")
+    print(
+        "objective_scale_summary = "
+        f"{{'transport_scale': {summary.objective_scale_summary.transport_scale:.6f}, "
+        f"'noise_action_scale': {summary.objective_scale_summary.noise_action_scale:.6f}, "
+        f"'leakage_scale': {summary.objective_scale_summary.leakage_scale:.6f}, "
+        f"'control_cost_scale': {summary.objective_scale_summary.control_cost_scale:.6f}, "
+        f"'raw_scale_ratio': {summary.objective_scale_summary.raw_scale_ratio:.6f}}}"
+    )
+    print(f"mean_pairwise_theta_distance = {summary.mean_pairwise_theta_distance:.6f}")
+    print(f"min_pairwise_theta_distance = {summary.min_pairwise_theta_distance:.6f}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    for result in results:
+        top_knobs = sorted(result.knob_profiles, key=lambda item: item.mean_abs_value, reverse=True)[:2]
+        print(
+            f"{result.name} = "
+            f"{{'success_rate': {result.success_rate:.6f}, "
+            f"'mean_detector_success_gain': {result.mean_detector_success_gain:.6f}, "
+            f"'mean_noise_action_reduction': {result.mean_noise_action_reduction:.6f}, "
+            f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
+            f"'mean_normalized_objective_gain': {result.mean_normalized_objective_gain:.6f}, "
+            f"'mean_best_control_cost': {result.mean_best_control_cost:.6f}, "
+            f"'mean_saturated_knobs': {result.mean_saturated_knobs:.6f}, "
+            f"'dominant_knobs': {[item.knob for item in top_knobs]}, "
+            f"'pareto_optimal': {str(result.is_pareto_optimal).lower()}}}"
+        )
+    print(
+        "interpretation = This stress audit checks whether the Pareto layer reveals distinct transition-motor "
+        "regimes or mainly a narrow constraint-shaped family. It adds stress presets, normalized objective-gain "
+        "comparison and knob-profile inspection without changing the fixed physical grid or claiming full QEC."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1345,6 +1395,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transition-motor Pareto YAML path; accepted after the subcommand for operator convenience",
     )
+    transition_motor_pareto_audit_parser = subparsers.add_parser(
+        "transition-motor-pareto-audit",
+        help="Run a stress audit over Pareto weight presets for the transition motor",
+    )
+    transition_motor_pareto_audit_parser.add_argument(
+        "--config",
+        dest="transition_motor_pareto_audit_config",
+        default=None,
+        help="Optional transition-motor Pareto-audit YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1376,6 +1436,7 @@ def main() -> int:
         or getattr(args, "transition_motor_audit_config", None)
         or getattr(args, "transition_motor_ensemble_config", None)
         or getattr(args, "transition_motor_pareto_config", None)
+        or getattr(args, "transition_motor_pareto_audit_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1416,6 +1477,8 @@ def main() -> int:
         )
     if args.command == "transition-motor-pareto":
         return run_transition_motor_pareto_mode(config)
+    if args.command == "transition-motor-pareto-audit":
+        return run_transition_motor_pareto_audit_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
