@@ -21,12 +21,24 @@ from hardware.objective_modes import ObjectiveMode, ObjectiveNormalizationScale
 from hardware.motor_ensemble import (
     DetailedMotorEnsembleSample,
     MotorEnsembleSampleResult,
+    TransitionMotorEnsembleConfig,
+    apply_fabrication_disorder,
     run_single_motor_ensemble_sample,
     run_single_motor_ensemble_sample_detailed,
     sample_fabrication_disorder_profiles,
     sample_phase_noise_profiles,
     transition_motor_ensemble_from_dict,
 )
+from hardware.reversibility_audit import ReversibilityMetadata, compute_reversibility_metadata_for_hamiltonian
+from hardware.transition_motor import build_control_hamiltonian
+from hardware.transition_tuner import build_base_hamiltonian
+
+
+@dataclass(frozen=True)
+class ParetoReversibilityConfig:
+    enabled: bool
+    dephasing_strength: float
+    time_step_multiplier: float
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,12 @@ class ParetoRunResult:
     mean_best_control_cost: float
     mean_saturated_knobs: float
     mean_near_bound_knobs: float
+    mean_reversibility_score: float = float("nan")
+    mean_open_loss_delta: float = float("nan")
+    min_reversibility_score: float = float("nan")
+    max_open_loss_delta: float = float("nan")
+    reversibility_enabled: bool = False
+    dephasing_strength: float | None = None
     is_pareto_optimal: bool = False
     objective_mode_type: str = "raw"
     normalization: ObjectiveNormalizationScale | None = None
@@ -75,6 +93,11 @@ class ParetoSweepSummary:
     best_noise_action_name: str
     best_leakage_name: str
     best_balanced_name: str
+    reversibility_enabled: bool = False
+    dephasing_strength_for_reversibility: float | None = None
+    best_reversibility_name: str | None = None
+    lowest_open_loss_name: str | None = None
+    preferred_mode_with_reversibility_tiebreak: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +107,7 @@ class TransitionMotorParetoConfig:
     maximize: list[str]
     minimize: list[str]
     outputs: dict[str, str]
+    reversibility: ParetoReversibilityConfig | None = None
 
 
 def validate_weight_set(weight_set: ObjectiveWeightSet) -> None:
@@ -159,6 +183,18 @@ def transition_motor_pareto_from_dict(data: dict[str, Any]) -> TransitionMotorPa
         }
     }
     ensemble_config = transition_motor_ensemble_from_dict(ensemble_like)
+    reversibility_block = dict(block.get("reversibility", {}))
+    reversibility: ParetoReversibilityConfig | None = None
+    if reversibility_block:
+        reversibility = ParetoReversibilityConfig(
+            enabled=bool(reversibility_block.get("enabled", False)),
+            dephasing_strength=float(reversibility_block.get("dephasing_strength", 0.05)),
+            time_step_multiplier=float(reversibility_block.get("time_step_multiplier", 1.0)),
+        )
+        if reversibility.dephasing_strength < 0.0 or reversibility.dephasing_strength > 1.0:
+            raise ValueError("reversibility dephasing_strength must be in [0, 1]")
+        if reversibility.time_step_multiplier <= 0.0:
+            raise ValueError("reversibility time_step_multiplier must be positive")
     return TransitionMotorParetoConfig(
         ensemble_config=ensemble_config,
         weight_sets=load_weight_sets(block),
@@ -169,7 +205,20 @@ def transition_motor_pareto_from_dict(data: dict[str, Any]) -> TransitionMotorPa
             "summary_path": str(block["outputs"]["summary_path"]),
             "plot_path": str(block["outputs"]["plot_path"]),
         },
+        reversibility=reversibility,
     )
+
+
+def _require_metric_value(result: ParetoRunResult, metric: str) -> float:
+    if not hasattr(result, metric):
+        raise ValueError(f"requested Pareto metric is missing: {metric}")
+    value = getattr(result, metric)
+    if value is None:
+        raise ValueError(f"requested Pareto metric is unavailable: {metric}")
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        raise ValueError(f"requested Pareto metric is unavailable: {metric}")
+    return numeric
 
 
 def dominates(
@@ -184,8 +233,8 @@ def dominates(
     strictly_better = False
 
     for metric in maximize:
-        a_val = float(getattr(a, metric))
-        b_val = float(getattr(b, metric))
+        a_val = _require_metric_value(a, metric)
+        b_val = _require_metric_value(b, metric)
         if a_val < b_val - eps:
             at_least_as_good = False
             break
@@ -194,8 +243,8 @@ def dominates(
 
     if at_least_as_good:
         for metric in minimize:
-            a_val = float(getattr(a, metric))
-            b_val = float(getattr(b, metric))
+            a_val = _require_metric_value(a, metric)
+            b_val = _require_metric_value(b, metric)
             if a_val > b_val + eps:
                 at_least_as_good = False
                 break
@@ -211,6 +260,9 @@ def mark_pareto_front(
     maximize: list[str],
     minimize: list[str],
 ) -> list[ParetoRunResult]:
+    for result in results:
+        for metric in [*maximize, *minimize]:
+            _require_metric_value(result, metric)
     marked: list[ParetoRunResult] = []
     for candidate in results:
         dominated = any(
@@ -269,7 +321,47 @@ def choose_best_balanced(results: list[ParetoRunResult]) -> str:
     return max(results, key=lambda item: balanced_score(item, normalized)).name
 
 
-def _summarize_samples(name: str, weight_set: ObjectiveWeightSet, samples: list[MotorEnsembleSampleResult]) -> ParetoRunResult:
+def select_preferred_mode_with_reversibility(
+    modes: list[ParetoRunResult],
+    *,
+    detector_tolerance_fraction: float = 0.05,
+) -> str:
+    if not modes:
+        raise ValueError("modes must be non-empty")
+    if detector_tolerance_fraction < 0.0:
+        raise ValueError("detector_tolerance_fraction must be non-negative")
+
+    best_detector = max(_require_metric_value(mode, "mean_detector_success_gain") for mode in modes)
+    tolerance = max(abs(best_detector) * float(detector_tolerance_fraction), 1.0e-12)
+    eligible = [
+        mode
+        for mode in modes
+        if best_detector - _require_metric_value(mode, "mean_detector_success_gain") <= tolerance
+    ]
+    for mode in eligible:
+        _require_metric_value(mode, "mean_reversibility_score")
+        _require_metric_value(mode, "mean_open_loss_delta")
+        _require_metric_value(mode, "mean_best_control_cost")
+    ordered = sorted(
+        eligible,
+        key=lambda mode: (
+            -_require_metric_value(mode, "mean_reversibility_score"),
+            _require_metric_value(mode, "mean_open_loss_delta"),
+            _require_metric_value(mode, "mean_best_control_cost"),
+        ),
+    )
+    return ordered[0].name
+
+
+def _summarize_samples(
+    name: str,
+    weight_set: ObjectiveWeightSet,
+    samples: list[MotorEnsembleSampleResult],
+    reversibility_metadata: list[ReversibilityMetadata] | None = None,
+    *,
+    reversibility_enabled: bool = False,
+    dephasing_strength: float | None = None,
+) -> ParetoRunResult:
     rows = [
         {
             "detector_success_gain": sample.detector_success_gain,
@@ -283,6 +375,19 @@ def _summarize_samples(name: str, weight_set: ObjectiveWeightSet, samples: list[
         for sample in samples
     ]
     win_rates = compute_win_rates(rows)
+    if reversibility_enabled:
+        metadata = list(reversibility_metadata or [])
+        if len(metadata) != len(samples):
+            raise ValueError("reversibility metadata must align with samples when enabled")
+        mean_reversibility_score = float(np.mean([item.open_reversibility_score for item in metadata], dtype=np.float64))
+        mean_open_loss_delta = float(np.mean([item.open_loss_delta for item in metadata], dtype=np.float64))
+        min_reversibility_score = float(np.min([item.open_reversibility_score for item in metadata]))
+        max_open_loss_delta = float(np.max([item.open_loss_delta for item in metadata]))
+    else:
+        mean_reversibility_score = float("nan")
+        mean_open_loss_delta = float("nan")
+        min_reversibility_score = float("nan")
+        max_open_loss_delta = float("nan")
     return ParetoRunResult(
         name=name,
         weights=weight_set,
@@ -305,6 +410,12 @@ def _summarize_samples(name: str, weight_set: ObjectiveWeightSet, samples: list[
         mean_best_control_cost=float(np.mean([sample.best_control_cost for sample in samples])),
         mean_saturated_knobs=float(np.mean([sample.saturated_knobs for sample in samples])),
         mean_near_bound_knobs=float(np.mean([sample.near_bound_knobs for sample in samples])),
+        mean_reversibility_score=mean_reversibility_score,
+        mean_open_loss_delta=mean_open_loss_delta,
+        min_reversibility_score=min_reversibility_score,
+        max_open_loss_delta=max_open_loss_delta,
+        reversibility_enabled=reversibility_enabled,
+        dephasing_strength=dephasing_strength,
     )
 
 
@@ -331,6 +442,26 @@ def _sample_row_from_detail(detail: DetailedMotorEnsembleSample) -> dict[str, ob
         "success": float(1.0 if detail.sample.success else 0.0),
         "best_theta": dict(detail.best_theta),
     }
+
+
+def _sample_row_with_reversibility(
+    detail: DetailedMotorEnsembleSample,
+    metadata: ReversibilityMetadata | None,
+) -> dict[str, object]:
+    row = _sample_row_from_detail(detail)
+    if metadata is not None:
+        row.update(
+            {
+                "coherent_reversibility_score": float(metadata.coherent_reversibility_score),
+                "coherent_loss_delta": float(metadata.coherent_loss_delta),
+                "reversibility_score": float(metadata.open_reversibility_score),
+                "open_loss_delta": float(metadata.open_loss_delta),
+                "dephasing_strength": float(metadata.dephasing_strength),
+                "time_step_multiplier": float(metadata.time_step_multiplier),
+                "passed_coherent": float(1.0 if metadata.passed_coherent else 0.0),
+            }
+        )
+    return row
 
 
 def run_pareto_weight_sweep_with_samples(
@@ -380,6 +511,7 @@ def run_pareto_weight_sweep_with_samples(
         )
         samples: list[MotorEnsembleSampleResult] = []
         sample_rows: list[dict[str, object]] = []
+        reversibility_metadata: list[ReversibilityMetadata] = []
         for sample_id, onsite_profile in enumerate(fabrication_profiles):
             noise_profiles = sample_phase_noise_profiles(
                 phase_noise_per_sample,
@@ -399,11 +531,49 @@ def run_pareto_weight_sweep_with_samples(
             )
             sample = replace(detail.sample, sample_id=sample_id)
             samples.append(sample)
-            sample_rows.append(_sample_row_from_detail(replace(detail, sample=sample)))
-        results.append(_summarize_samples(weight_set.name, weight_set, samples))
+            metadata: ReversibilityMetadata | None = None
+            if parsed.reversibility is not None and parsed.reversibility.enabled:
+                disordered_H0 = apply_fabrication_disorder(build_base_hamiltonian(grid), onsite_profile)
+                best_H = build_control_hamiltonian(
+                    disordered_H0,
+                    grid,
+                    detail.best_theta,
+                    basis,
+                    registry,
+                )
+                metadata = compute_reversibility_metadata_for_hamiltonian(
+                    H=best_H,
+                    input_index=grid.input_index,
+                    target_indices=list(grid.target_indices),
+                    time_min=motor_config.time_min,
+                    time_max=motor_config.time_max,
+                    n_time_samples=motor_config.n_time_samples,
+                    dephasing_strength=parsed.reversibility.dephasing_strength,
+                    time_step_multiplier=parsed.reversibility.time_step_multiplier,
+                )
+                reversibility_metadata.append(metadata)
+            sample_rows.append(_sample_row_with_reversibility(replace(detail, sample=sample), metadata))
+        results.append(
+            _summarize_samples(
+                weight_set.name,
+                weight_set,
+                samples,
+                reversibility_metadata if parsed.reversibility is not None and parsed.reversibility.enabled else None,
+                reversibility_enabled=bool(parsed.reversibility is not None and parsed.reversibility.enabled),
+                dephasing_strength=None if parsed.reversibility is None or not parsed.reversibility.enabled else parsed.reversibility.dephasing_strength,
+            )
+        )
         per_preset_sample_rows[weight_set.name] = sample_rows
 
     marked = mark_pareto_front(results, maximize=parsed.maximize, minimize=parsed.minimize)
+    reversibility_enabled = bool(parsed.reversibility is not None and parsed.reversibility.enabled)
+    best_reversibility_name = None
+    lowest_open_loss_name = None
+    preferred_mode = None
+    if reversibility_enabled and marked:
+        best_reversibility_name = max(marked, key=lambda item: _require_metric_value(item, "mean_reversibility_score")).name
+        lowest_open_loss_name = min(marked, key=lambda item: _require_metric_value(item, "mean_open_loss_delta")).name
+        preferred_mode = select_preferred_mode_with_reversibility(marked)
     summary = ParetoSweepSummary(
         n_weight_sets=len(marked),
         pareto_optimal_names=[item.name for item in marked if item.is_pareto_optimal],
@@ -411,6 +581,11 @@ def run_pareto_weight_sweep_with_samples(
         best_noise_action_name=max(marked, key=lambda item: item.mean_noise_action_reduction).name,
         best_leakage_name=max(marked, key=lambda item: item.mean_noise_leakage_reduction).name,
         best_balanced_name=choose_best_balanced(marked),
+        reversibility_enabled=reversibility_enabled,
+        dephasing_strength_for_reversibility=None if parsed.reversibility is None or not parsed.reversibility.enabled else parsed.reversibility.dephasing_strength,
+        best_reversibility_name=best_reversibility_name,
+        lowest_open_loss_name=lowest_open_loss_name,
+        preferred_mode_with_reversibility_tiebreak=preferred_mode,
     )
     return marked, summary, per_preset_sample_rows
 
@@ -423,6 +598,7 @@ def run_pareto_weight_sweep(config: dict[str, Any]) -> tuple[list[ParetoRunResul
 def write_pareto_csv(path: str | Path, results: list[ParetoRunResult]) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    include_reversibility = any(result.reversibility_enabled for result in results)
     fieldnames = [
         "name",
         "mode",
@@ -453,42 +629,63 @@ def write_pareto_csv(path: str | Path, results: list[ParetoRunResult]) -> Path:
         "mean_near_bound_knobs",
         "is_pareto_optimal",
     ]
+    if include_reversibility:
+        fieldnames.extend(
+            [
+                "reversibility_enabled",
+                "dephasing_strength",
+                "mean_reversibility_score",
+                "mean_open_loss_delta",
+                "min_reversibility_score",
+                "max_open_loss_delta",
+            ]
+        )
     with output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for result in results:
-            writer.writerow(
-                {
-                    "name": result.name,
-                    "mode": result.objective_mode_type,
-                    "transport": result.weights.transport,
-                    "noise_action": result.weights.noise_action,
-                    "leakage": result.weights.leakage,
-                    "control_cost_weight": result.weights.control_cost,
-                    "transport_scale": None if result.normalization is None else result.normalization.transport_scale,
-                    "noise_action_scale": None if result.normalization is None else result.normalization.noise_action_scale,
-                    "leakage_scale": None if result.normalization is None else result.normalization.leakage_scale,
-                    "control_cost_scale": None if result.normalization is None else result.normalization.control_cost_scale,
-                    "n_samples": result.n_samples,
-                    "success_rate": result.success_rate,
-                    "detector_win_rate": result.detector_win_rate,
-                    "noise_action_win_rate": result.noise_action_win_rate,
-                    "leakage_win_rate": result.leakage_win_rate,
-                    "objective_win_rate": result.objective_win_rate,
-                    "mean_detector_success_gain": result.mean_detector_success_gain,
-                    "median_detector_success_gain": result.median_detector_success_gain,
-                    "mean_noise_action_reduction": result.mean_noise_action_reduction,
-                    "median_noise_action_reduction": result.median_noise_action_reduction,
-                    "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
-                    "median_noise_leakage_reduction": result.median_noise_leakage_reduction,
-                    "mean_objective_gain": result.mean_objective_gain,
-                    "median_objective_gain": result.median_objective_gain,
-                    "mean_best_control_cost": result.mean_best_control_cost,
-                    "mean_saturated_knobs": result.mean_saturated_knobs,
-                    "mean_near_bound_knobs": result.mean_near_bound_knobs,
-                    "is_pareto_optimal": result.is_pareto_optimal,
-                }
-            )
+            row = {
+                "name": result.name,
+                "mode": result.objective_mode_type,
+                "transport": result.weights.transport,
+                "noise_action": result.weights.noise_action,
+                "leakage": result.weights.leakage,
+                "control_cost_weight": result.weights.control_cost,
+                "transport_scale": None if result.normalization is None else result.normalization.transport_scale,
+                "noise_action_scale": None if result.normalization is None else result.normalization.noise_action_scale,
+                "leakage_scale": None if result.normalization is None else result.normalization.leakage_scale,
+                "control_cost_scale": None if result.normalization is None else result.normalization.control_cost_scale,
+                "n_samples": result.n_samples,
+                "success_rate": result.success_rate,
+                "detector_win_rate": result.detector_win_rate,
+                "noise_action_win_rate": result.noise_action_win_rate,
+                "leakage_win_rate": result.leakage_win_rate,
+                "objective_win_rate": result.objective_win_rate,
+                "mean_detector_success_gain": result.mean_detector_success_gain,
+                "median_detector_success_gain": result.median_detector_success_gain,
+                "mean_noise_action_reduction": result.mean_noise_action_reduction,
+                "median_noise_action_reduction": result.median_noise_action_reduction,
+                "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
+                "median_noise_leakage_reduction": result.median_noise_leakage_reduction,
+                "mean_objective_gain": result.mean_objective_gain,
+                "median_objective_gain": result.median_objective_gain,
+                "mean_best_control_cost": result.mean_best_control_cost,
+                "mean_saturated_knobs": result.mean_saturated_knobs,
+                "mean_near_bound_knobs": result.mean_near_bound_knobs,
+                "is_pareto_optimal": result.is_pareto_optimal,
+            }
+            if include_reversibility:
+                row.update(
+                    {
+                        "reversibility_enabled": result.reversibility_enabled,
+                        "dephasing_strength": result.dephasing_strength,
+                        "mean_reversibility_score": result.mean_reversibility_score,
+                        "mean_open_loss_delta": result.mean_open_loss_delta,
+                        "min_reversibility_score": result.min_reversibility_score,
+                        "max_open_loss_delta": result.max_open_loss_delta,
+                    }
+                )
+            writer.writerow(row)
     return output
 
 
@@ -499,8 +696,47 @@ def write_pareto_summary_json(
 ) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    include_reversibility = any(result.reversibility_enabled for result in results)
+    result_payloads = []
+    for result in results:
+        payload = {
+            "name": result.name,
+            "weights": asdict(result.weights),
+            "n_samples": result.n_samples,
+            "success_rate": result.success_rate,
+            "detector_win_rate": result.detector_win_rate,
+            "noise_action_win_rate": result.noise_action_win_rate,
+            "leakage_win_rate": result.leakage_win_rate,
+            "objective_win_rate": result.objective_win_rate,
+            "mean_detector_success_gain": result.mean_detector_success_gain,
+            "median_detector_success_gain": result.median_detector_success_gain,
+            "mean_noise_action_reduction": result.mean_noise_action_reduction,
+            "median_noise_action_reduction": result.median_noise_action_reduction,
+            "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
+            "median_noise_leakage_reduction": result.median_noise_leakage_reduction,
+            "mean_objective_gain": result.mean_objective_gain,
+            "median_objective_gain": result.median_objective_gain,
+            "mean_best_control_cost": result.mean_best_control_cost,
+            "mean_saturated_knobs": result.mean_saturated_knobs,
+            "mean_near_bound_knobs": result.mean_near_bound_knobs,
+            "is_pareto_optimal": result.is_pareto_optimal,
+            "objective_mode_type": result.objective_mode_type,
+            "normalization": None if result.normalization is None else asdict(result.normalization),
+        }
+        if include_reversibility:
+            payload.update(
+                {
+                    "reversibility_enabled": result.reversibility_enabled,
+                    "dephasing_strength": result.dephasing_strength,
+                    "mean_reversibility_score": result.mean_reversibility_score,
+                    "mean_open_loss_delta": result.mean_open_loss_delta,
+                    "min_reversibility_score": result.min_reversibility_score,
+                    "max_open_loss_delta": result.max_open_loss_delta,
+                }
+            )
+        result_payloads.append(payload)
     payload = {
-        "results": [{**asdict(result), "weights": asdict(result.weights)} for result in results],
+        "results": result_payloads,
         "summary": asdict(summary),
     }
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

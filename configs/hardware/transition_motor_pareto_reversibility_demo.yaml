@@ -1,0 +1,68 @@
+transition_motor_pareto_audit:
+  base_config: configs/hardware/transition_motor_pareto_demo.yaml
+
+  fabrication_disorder:
+    n_samples: 6
+    onsite_sigma: 0.08
+    correlation_length_sites: 2.0
+    seed: 123
+
+  phase_noise:
+    n_profiles_per_sample: 3
+    profile_sigma: 1.0
+    correlation_length_sites: 2.0
+    seed: 456
+
+  optimizer:
+    time_min: 0.0
+    time_max: 20.0
+    n_time_samples: 100
+    n_transport_modes: 2
+    finite_diff_eps: 0.0001
+    optimizer_steps: 12
+    optimizer_step_size: 0.05
+    random_restarts: 1
+    seed: 42
+
+  stress_weight_sets:
+    - name: ultra_detector
+      transport: 3.0
+      noise_action: 0.0
+      leakage: 0.0
+      control_cost: 0.005
+
+    - name: normalized_noise_strong
+      mode: normalized
+      transport: 1.0
+      noise_action: 3.0
+      leakage: 1.0
+      control_cost: 0.05
+      normalization:
+        transport_scale: 0.05
+        noise_action_scale: 0.002
+        leakage_scale: 0.001
+        control_cost_scale: 0.04
+
+  reversibility:
+    enabled: true
+    dephasing_strength: 0.05
+    time_step_multiplier: 1.0
+
+  bootstrap:
+    n_bootstrap: 1000
+    ci: 0.95
+    seed: 123
+
+  regime_distance:
+    metrics:
+      - mean_detector_success_gain
+      - mean_noise_action_reduction
+      - mean_noise_leakage_reduction
+      - success_rate
+      - mean_best_control_cost
+      - mean_saturated_knobs
+
+  outputs:
+    csv_path: outputs/transition_motor_pareto_reversibility.csv
+    summary_path: outputs/transition_motor_pareto_reversibility_summary.json
+    plot_path: results/renders/transition_motor_pareto_reversibility.png

@@ -1324,6 +1324,12 @@ def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
     print(f"best_noise_action_name = {summary.best_noise_action_name}")
     print(f"best_leakage_name = {summary.best_leakage_name}")
     print(f"best_balanced_name = {summary.best_balanced_name}")
+    if summary.reversibility_enabled:
+        print(f"reversibility_enabled = {summary.reversibility_enabled}")
+        print(f"dephasing_strength = {summary.dephasing_strength_for_reversibility}")
+        print(f"best_reversibility_name = {summary.best_reversibility_name}")
+        print(f"lowest_open_loss_name = {summary.lowest_open_loss_name}")
+        print(f"preferred_mode_with_reversibility_tiebreak = {summary.preferred_mode_with_reversibility_tiebreak}")
     print(f"csv_path = {csv_path}")
     print(f"summary_path = {summary_path}")
     print(f"plot_path = {plot_path}")
@@ -1337,6 +1343,8 @@ def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
             f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
             f"'mean_best_control_cost': {result.mean_best_control_cost:.6f}, "
             f"'mean_saturated_knobs': {result.mean_saturated_knobs:.6f}, "
+            f"'mean_reversibility_score': {result.mean_reversibility_score:.6f}, "
+            f"'mean_open_loss_delta': {result.mean_open_loss_delta:.6f}, "
             f"'pareto_optimal': {str(result.is_pareto_optimal).lower()}}}"
         )
     print(
@@ -1382,6 +1390,13 @@ def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
     print(f"most_separated_presets = {audit_result.summary.most_separated_presets}")
     print(f"compressed_frontier = {str(audit_result.summary.compressed_frontier).lower()}")
     print(f"best_normalized_score_name = {audit_result.best_normalized_score_name}")
+    print(f"reversibility_enabled = {str(audit_result.summary.reversibility_enabled).lower()}")
+    print(f"dephasing_strength_for_reversibility = {audit_result.summary.dephasing_strength_for_reversibility}")
+    print(f"best_reversibility_name = {audit_result.summary.best_reversibility_name}")
+    print(f"lowest_open_loss_name = {audit_result.summary.lowest_open_loss_name}")
+    print(f"preferred_mode_with_reversibility_tiebreak = {audit_result.summary.preferred_mode_with_reversibility_tiebreak}")
+    print(f"reversibility_score_by_preset = {audit_result.reversibility_score_by_preset}")
+    print(f"open_loss_delta_by_preset = {audit_result.open_loss_delta_by_preset}")
     print(f"csv_path = {csv_path}")
     print(f"summary_path = {summary_path}")
     print(f"plot_path = {plot_path}")

@@ -12,10 +12,12 @@ import yaml
 from hardware.reversibility_audit import (
     CoherentReversibilityResult,
     OpenReversibilityResult,
+    ReversibilityMetadata,
     adjusted_n_time_samples,
     apply_dephasing_channel,
     basis_state,
     choose_forward_time,
+    compute_reversibility_metadata_for_hamiltonian,
     density_from_state,
     phase_aligned_l2_error,
     plot_reversibility_audit,
@@ -149,6 +151,19 @@ class ReversibilityAuditTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.linalg.norm(psi)), 1.0)
         self.assertAlmostEqual(state_fidelity(psi, psi), 1.0)
 
+    def test_reversibility_metadata_dataclass(self):
+        metadata = ReversibilityMetadata(
+            coherent_reversibility_score=1.0,
+            coherent_loss_delta=0.0,
+            open_reversibility_score=0.98,
+            open_loss_delta=0.02,
+            dephasing_strength=0.05,
+            time_step_multiplier=1.0,
+            passed_coherent=True,
+        )
+        self.assertTrue(metadata.passed_coherent)
+        self.assertAlmostEqual(metadata.open_loss_delta, 0.02)
+
     def test_phase_aligned_l2_error_ignores_global_phase(self):
         psi = np.array([1.0, 0.0], dtype=np.complex128)
         phased = np.exp(1j * 0.7) * psi
@@ -191,6 +206,31 @@ class ReversibilityAuditTests(unittest.TestCase):
             pure_state_return_fidelity(rho_rev_clean, psi0),
             pure_state_return_fidelity(rho_rev_noisy, psi0),
         )
+
+    def test_compute_reversibility_metadata_for_hamiltonian(self):
+        H = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+        clean = compute_reversibility_metadata_for_hamiltonian(
+            H=H,
+            input_index=0,
+            target_indices=[1],
+            time_min=0.0,
+            time_max=3.0,
+            n_time_samples=50,
+            dephasing_strength=0.0,
+        )
+        noisy = compute_reversibility_metadata_for_hamiltonian(
+            H=H,
+            input_index=0,
+            target_indices=[1],
+            time_min=0.0,
+            time_max=3.0,
+            n_time_samples=50,
+            dephasing_strength=0.1,
+        )
+        self.assertGreaterEqual(clean.coherent_reversibility_score, 0.999999)
+        self.assertLessEqual(clean.coherent_loss_delta, 1.0e-9)
+        self.assertGreater(noisy.open_loss_delta, clean.open_loss_delta)
+        self.assertAlmostEqual(noisy.dephasing_strength, 0.1)
 
     def test_adjusted_n_time_samples(self):
         self.assertEqual(

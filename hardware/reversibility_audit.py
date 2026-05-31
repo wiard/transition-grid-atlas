@@ -27,6 +27,21 @@ from hardware.transition_motor import (
 from hardware.transition_tuner import build_base_hamiltonian
 
 
+DEFAULT_COHERENT_FIDELITY_MIN = 0.999999
+DEFAULT_COHERENT_L2_ERROR_MAX = 1.0e-6
+
+
+@dataclass(frozen=True)
+class ReversibilityMetadata:
+    coherent_reversibility_score: float
+    coherent_loss_delta: float
+    open_reversibility_score: float
+    open_loss_delta: float
+    dephasing_strength: float
+    time_step_multiplier: float
+    passed_coherent: bool
+
+
 @dataclass(frozen=True)
 class CoherentReversibilityResult:
     mode_name: str
@@ -201,6 +216,86 @@ def choose_forward_time(
         for t in grid
     ]
     return float(grid[int(np.argmax(np.asarray(scores, dtype=np.float64)))])
+
+
+def compute_reversibility_metadata_for_hamiltonian(
+    *,
+    H: np.ndarray,
+    input_index: int,
+    target_indices: list[int],
+    time_min: float,
+    time_max: float,
+    n_time_samples: int,
+    dephasing_strength: float = 0.05,
+    time_step_multiplier: float = 1.0,
+    forward_time_selection: str = "peak_target",
+    coherent_fidelity_min: float = DEFAULT_COHERENT_FIDELITY_MIN,
+    coherent_l2_error_max: float = DEFAULT_COHERENT_L2_ERROR_MAX,
+) -> ReversibilityMetadata:
+    adjusted_samples = adjusted_n_time_samples(
+        time_min=float(time_min),
+        time_max=float(time_max),
+        n_time_samples=int(n_time_samples),
+        time_step_multiplier=float(time_step_multiplier),
+    )
+    times = np.linspace(float(time_min), float(time_max), adjusted_samples, dtype=np.float64)
+    forward_time = choose_forward_time(
+        np.asarray(H, dtype=np.complex128),
+        int(input_index),
+        [int(value) for value in target_indices],
+        times,
+        method=forward_time_selection,
+    )
+    psi0 = basis_state(int(np.asarray(H).shape[0]), int(input_index))
+    U_fwd = unitary_from_hamiltonian(H, forward_time)
+    U_rev = unitary_from_hamiltonian(H, -forward_time)
+    psi_rev = U_rev @ (U_fwd @ psi0)
+    coherent_score = state_fidelity(psi0, psi_rev)
+    coherent_return_probability = float(np.clip(abs(np.vdot(psi0, psi_rev)) ** 2, 0.0, 1.0))
+    coherent_loss = float(max(0.0, 1.0 - coherent_return_probability))
+    l2_error = phase_aligned_l2_error(psi0, psi_rev)
+    passed_coherent = bool(
+        coherent_score >= float(coherent_fidelity_min)
+        and l2_error <= float(coherent_l2_error_max)
+    )
+
+    psi_fwd = U_fwd @ psi0
+    rho_fwd = density_from_state(psi_fwd)
+    rho_dephased = apply_dephasing_channel(rho_fwd, float(dephasing_strength))
+    rho_rev = reverse_density_matrix(H, rho_dephased, forward_time)
+    open_score = pure_state_return_fidelity(rho_rev, psi0)
+    open_loss = float(max(0.0, 1.0 - open_score))
+
+    return ReversibilityMetadata(
+        coherent_reversibility_score=float(coherent_score),
+        coherent_loss_delta=coherent_loss,
+        open_reversibility_score=float(open_score),
+        open_loss_delta=open_loss,
+        dephasing_strength=float(dephasing_strength),
+        time_step_multiplier=float(time_step_multiplier),
+        passed_coherent=passed_coherent,
+    )
+
+
+def compute_reversibility_metadata_for_mode(
+    *,
+    mode_name: str,
+    mode_config: dict[str, Any],
+    dephasing_strength: float = 0.05,
+    time_step_multiplier: float = 1.0,
+) -> ReversibilityMetadata:
+    del mode_name
+    H_best, motor_config, _ = _mode_hamiltonian(mode_config, time_step_multiplier=float(time_step_multiplier))
+    return compute_reversibility_metadata_for_hamiltonian(
+        H=H_best,
+        input_index=motor_config.grid.input_index,
+        target_indices=list(motor_config.grid.target_indices),
+        time_min=motor_config.time_min,
+        time_max=motor_config.time_max,
+        n_time_samples=motor_config.n_time_samples,
+        dephasing_strength=float(dephasing_strength),
+        time_step_multiplier=float(time_step_multiplier),
+    )
 
 
 def _reversibility_block(config: dict[str, Any]) -> dict[str, Any]:

@@ -22,6 +22,7 @@ from hardware.motor_pareto import (
     ParetoRunResult,
     ObjectiveWeightSet,
     run_pareto_weight_sweep_with_samples,
+    select_preferred_mode_with_reversibility,
 )
 
 
@@ -74,6 +75,11 @@ class ParetoAuditSummary:
     closest_presets: tuple[str, str]
     most_separated_presets: tuple[str, str]
     compressed_frontier: bool
+    reversibility_enabled: bool = False
+    dephasing_strength_for_reversibility: float | None = None
+    best_reversibility_name: str | None = None
+    lowest_open_loss_name: str | None = None
+    preferred_mode_with_reversibility_tiebreak: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,8 @@ class ParetoAuditResult:
     n_samples_per_preset: int
     bootstrap_n: int
     bootstrap_ci: float
+    reversibility_score_by_preset: dict[str, float] | None = None
+    open_loss_delta_by_preset: dict[str, float] | None = None
     csv_path: str | None = None
     summary_path: str | None = None
     plot_path: str | None = None
@@ -152,6 +160,16 @@ def merge_base_and_stress_weight_sets(base_config: dict[str, Any], audit_config:
         ordered_weight_sets.append(item)
 
     base_block["weight_sets"] = ordered_weight_sets
+    for key in (
+        "fabrication_disorder",
+        "phase_noise",
+        "optimizer",
+        "success_criteria",
+        "pareto",
+        "reversibility",
+    ):
+        if key in audit_block:
+            base_block[key] = deepcopy(audit_block[key])
     if "outputs" in audit_block:
         base_block["outputs"] = deepcopy(dict(audit_block["outputs"]))
     merged["transition_motor_pareto"] = base_block
@@ -445,6 +463,37 @@ def run_pareto_audit(config_path: str | Path) -> ParetoAuditResult:
     component_scales = [compute_component_scale(result) for result in results]
     normalized_scores = normalized_balanced_scores(results)
     best_normalized_score_name = max(normalized_scores.items(), key=lambda item: item[1])[0]
+    reversibility_enabled = any(result.reversibility_enabled for result in results)
+    reversibility_score_by_preset = (
+        {result.name: float(result.mean_reversibility_score) for result in results}
+        if reversibility_enabled
+        else None
+    )
+    open_loss_delta_by_preset = (
+        {result.name: float(result.mean_open_loss_delta) for result in results}
+        if reversibility_enabled
+        else None
+    )
+    best_reversibility_name = (
+        max(results, key=lambda item: float(item.mean_reversibility_score)).name
+        if reversibility_enabled and results
+        else None
+    )
+    lowest_open_loss_name = (
+        min(results, key=lambda item: float(item.mean_open_loss_delta)).name
+        if reversibility_enabled and results
+        else None
+    )
+    preferred_mode_with_reversibility_tiebreak = (
+        select_preferred_mode_with_reversibility(results)
+        if reversibility_enabled and results
+        else None
+    )
+    dephasing_strength_for_reversibility = (
+        next((result.dephasing_strength for result in results if result.reversibility_enabled), None)
+        if reversibility_enabled
+        else None
+    )
 
     bootstrap_block = dict(audit_config["transition_motor_pareto_audit"]["bootstrap"])
     ci_metrics = [
@@ -476,6 +525,11 @@ def run_pareto_audit(config_path: str | Path) -> ParetoAuditResult:
         closest_presets=tuple(regime_summary["closest_presets"]),
         most_separated_presets=tuple(regime_summary["most_separated_presets"]),
         compressed_frontier=compressed,
+        reversibility_enabled=reversibility_enabled,
+        dephasing_strength_for_reversibility=dephasing_strength_for_reversibility,
+        best_reversibility_name=best_reversibility_name,
+        lowest_open_loss_name=lowest_open_loss_name,
+        preferred_mode_with_reversibility_tiebreak=preferred_mode_with_reversibility_tiebreak,
     )
     return ParetoAuditResult(
         pareto_results=results,
@@ -489,6 +543,8 @@ def run_pareto_audit(config_path: str | Path) -> ParetoAuditResult:
         n_samples_per_preset=results[0].n_samples if results else 0,
         bootstrap_n=int(bootstrap_block["n_bootstrap"]),
         bootstrap_ci=float(bootstrap_block["ci"]),
+        reversibility_score_by_preset=reversibility_score_by_preset,
+        open_loss_delta_by_preset=open_loss_delta_by_preset,
         csv_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["csv_path"]),
         summary_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["summary_path"]),
         plot_path=str(audit_config["transition_motor_pareto_audit"]["outputs"]["plot_path"]),
@@ -503,33 +559,44 @@ def write_pareto_audit_csv(
     output.parent.mkdir(parents=True, exist_ok=True)
     component_lookup = {item.preset_name: item for item in audit_result.component_scales}
     rows = []
+    include_reversibility = bool(audit_result.summary.reversibility_enabled)
     for result in audit_result.pareto_results:
         component = component_lookup[result.name]
-        rows.append(
-            {
-                "name": result.name,
-                "mode": result.objective_mode_type,
-                "normalization_scales": None
-                if result.normalization is None
-                else {
-                    "transport_scale": result.normalization.transport_scale,
-                    "noise_action_scale": result.normalization.noise_action_scale,
-                    "leakage_scale": result.normalization.leakage_scale,
-                    "control_cost_scale": result.normalization.control_cost_scale,
-                },
-                "success_rate": result.success_rate,
-                "mean_detector_success_gain": result.mean_detector_success_gain,
-                "mean_noise_action_reduction": result.mean_noise_action_reduction,
-                "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
-                "mean_best_control_cost": result.mean_best_control_cost,
-                "mean_saturated_knobs": result.mean_saturated_knobs,
-                "pareto_optimal": result.is_pareto_optimal,
-                "normalized_balanced_score": audit_result.normalized_scores[result.name],
-                "dominant_component": component.dominant_component,
-                "detector_to_noise_ratio": component.detector_to_noise_ratio,
-                "detector_to_leakage_ratio": component.detector_to_leakage_ratio,
-            }
-        )
+        row = {
+            "name": result.name,
+            "mode": result.objective_mode_type,
+            "normalization_scales": None
+            if result.normalization is None
+            else {
+                "transport_scale": result.normalization.transport_scale,
+                "noise_action_scale": result.normalization.noise_action_scale,
+                "leakage_scale": result.normalization.leakage_scale,
+                "control_cost_scale": result.normalization.control_cost_scale,
+            },
+            "success_rate": result.success_rate,
+            "mean_detector_success_gain": result.mean_detector_success_gain,
+            "mean_noise_action_reduction": result.mean_noise_action_reduction,
+            "mean_noise_leakage_reduction": result.mean_noise_leakage_reduction,
+            "mean_best_control_cost": result.mean_best_control_cost,
+            "mean_saturated_knobs": result.mean_saturated_knobs,
+            "pareto_optimal": result.is_pareto_optimal,
+            "normalized_balanced_score": audit_result.normalized_scores[result.name],
+            "dominant_component": component.dominant_component,
+            "detector_to_noise_ratio": component.detector_to_noise_ratio,
+            "detector_to_leakage_ratio": component.detector_to_leakage_ratio,
+        }
+        if include_reversibility:
+            row.update(
+                {
+                    "reversibility_enabled": result.reversibility_enabled,
+                    "dephasing_strength": result.dephasing_strength,
+                    "mean_reversibility_score": result.mean_reversibility_score,
+                    "mean_open_loss_delta": result.mean_open_loss_delta,
+                    "min_reversibility_score": result.min_reversibility_score,
+                    "max_open_loss_delta": result.max_open_loss_delta,
+                }
+            )
+        rows.append(row)
     with output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -555,6 +622,9 @@ def write_pareto_audit_summary_json(
         "bootstrap_n": audit_result.bootstrap_n,
         "bootstrap_ci": audit_result.bootstrap_ci,
     }
+    if audit_result.summary.reversibility_enabled:
+        payload["reversibility_score_by_preset"] = audit_result.reversibility_score_by_preset
+        payload["open_loss_delta_by_preset"] = audit_result.open_loss_delta_by_preset
     output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return output
 

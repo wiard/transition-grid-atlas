@@ -28,6 +28,15 @@ Pairwise distances between normalized preset metric vectors reveal whether prese
 Compressed frontier means the current motor and bounds produce similar outcomes across presets.
 Separated regimes mean objective weights genuinely steer different transition-motor behavior.
 
+## Reversibility as Operating-Mode Metadata
+
+- coherent_reversibility_score is a sanity check for U(-t)U(t)
+- open_reversibility_score measures return under dephasing
+- open_loss_delta quantifies dephasing-induced irreversibility
+- these metrics do not imply time travel or fundamental time reversal
+- they can be used as hardware-native error-suppression metadata
+- in detector-equivalent modes, higher reversibility_score can act as a tie-breaker
+
 ## Caution
 Synthetic ensemble only.
 Not experimental validation.

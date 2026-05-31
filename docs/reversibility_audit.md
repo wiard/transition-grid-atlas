@@ -35,6 +35,15 @@ It tests whether applying U(-t) after U(t) restores the initial state within num
 For Hermitian time-independent H, coherent reversibility should pass.
 For dephasing/noisy dynamics, coherent inverse does not generally undo the noise.
 
+## Reversibility as Operating-Mode Metadata
+
+- coherent_reversibility_score is a sanity check for U(-t)U(t)
+- open_reversibility_score measures return under dephasing
+- open_loss_delta quantifies dephasing-induced irreversibility
+- these metrics do not imply time travel or fundamental time reversal
+- they can be used as hardware-native error-suppression metadata
+- in detector-equivalent modes, higher reversibility_score can act as a tie-breaker
+
 ## Governance
 
 Data first, interpretation second.

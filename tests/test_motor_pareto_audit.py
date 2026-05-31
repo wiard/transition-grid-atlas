@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -139,6 +140,9 @@ class MotorParetoAuditTests(unittest.TestCase):
             self.assertTrue(csv_path.exists())
             self.assertTrue(json_path.exists())
             self.assertTrue(plot_path.exists())
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertIn("reversibility_score_by_preset", payload)
+            self.assertIn("open_loss_delta_by_preset", payload)
 
     def test_tiny_audit_run_works(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -153,6 +157,12 @@ class MotorParetoAuditTests(unittest.TestCase):
             self.assertEqual(result.summary.n_presets, 4)
             self.assertEqual(result.summary.base_preset_names, ["balanced", "noise_suppression"])
             self.assertEqual(result.summary.stress_preset_names, ["ultra_detector", "ultra_noise"])
+            self.assertTrue(result.summary.reversibility_enabled)
+            self.assertIsNotNone(result.summary.best_reversibility_name)
+            self.assertIsNotNone(result.summary.lowest_open_loss_name)
+            self.assertIsNotNone(result.summary.preferred_mode_with_reversibility_tiebreak)
+            self.assertIsInstance(result.reversibility_score_by_preset, dict)
+            self.assertIsInstance(result.open_loss_delta_by_preset, dict)
 
     def build_result(
         self,
@@ -189,6 +199,12 @@ class MotorParetoAuditTests(unittest.TestCase):
             mean_best_control_cost=cost,
             mean_saturated_knobs=saturated,
             mean_near_bound_knobs=saturated,
+            mean_reversibility_score=0.985,
+            mean_open_loss_delta=0.015,
+            min_reversibility_score=0.982,
+            max_open_loss_delta=0.018,
+            reversibility_enabled=True,
+            dephasing_strength=0.05,
             is_pareto_optimal=True,
         )
 
@@ -247,6 +263,11 @@ class MotorParetoAuditTests(unittest.TestCase):
             closest_presets=tuple(distance_summary["closest_presets"]),
             most_separated_presets=tuple(distance_summary["most_separated_presets"]),
             compressed_frontier=False,
+            reversibility_enabled=True,
+            dephasing_strength_for_reversibility=0.05,
+            best_reversibility_name=max(results, key=lambda item: item.mean_reversibility_score).name,
+            lowest_open_loss_name=min(results, key=lambda item: item.mean_open_loss_delta).name,
+            preferred_mode_with_reversibility_tiebreak=max(results, key=lambda item: item.mean_reversibility_score).name,
         )
         confidence_intervals = [
             {
@@ -273,6 +294,8 @@ class MotorParetoAuditTests(unittest.TestCase):
             n_samples_per_preset=3,
             bootstrap_n=200,
             bootstrap_ci=0.95,
+            reversibility_score_by_preset={result.name: result.mean_reversibility_score for result in results},
+            open_loss_delta_by_preset={result.name: result.mean_open_loss_delta for result in results},
         )
 
     def build_base_pareto_config(self) -> dict[str, object]:
@@ -349,11 +372,18 @@ class MotorParetoAuditTests(unittest.TestCase):
                         "mean_noise_action_reduction",
                         "mean_noise_leakage_reduction",
                         "success_rate",
+                        "mean_reversibility_score",
                     ],
                     "minimize": [
                         "mean_best_control_cost",
                         "mean_saturated_knobs",
+                        "mean_open_loss_delta",
                     ],
+                },
+                "reversibility": {
+                    "enabled": True,
+                    "dephasing_strength": 0.05,
+                    "time_step_multiplier": 1.0,
                 },
                 "outputs": {
                     "csv_path": "outputs/base.csv",
@@ -384,7 +414,14 @@ class MotorParetoAuditTests(unittest.TestCase):
                         "success_rate",
                         "mean_best_control_cost",
                         "mean_saturated_knobs",
+                        "mean_reversibility_score",
+                        "mean_open_loss_delta",
                     ]
+                },
+                "reversibility": {
+                    "enabled": True,
+                    "dephasing_strength": 0.05,
+                    "time_step_multiplier": 1.0,
                 },
                 "outputs": {
                     "csv_path": "outputs/transition_motor_pareto_audit.csv",
