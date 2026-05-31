@@ -52,8 +52,8 @@ from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
 from hardware.objective_mode_comparison import (
     bootstrap_delta_ci,
+    execute_objective_mode_comparison,
     plot_objective_mode_comparison,
-    run_objective_mode_comparison,
     run_scale_sensitivity,
     write_comparison_csv,
     write_comparison_summary_json,
@@ -1410,7 +1410,9 @@ def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
 
 
 def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
-    samples, summary = run_objective_mode_comparison(config)
+    runtime = execute_objective_mode_comparison(config)
+    samples = runtime.samples
+    summary = runtime.summary
     block = dict(config["objective_mode_comparison"])
     bootstrap_block = dict(block["bootstrap"])
     bootstrap_ci = {
@@ -1438,57 +1440,99 @@ def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
             ci=float(bootstrap_block["ci"]),
             seed=int(bootstrap_block["seed"]) + 3,
         ),
-        "objective_delta": bootstrap_delta_ci(
-            np.array([sample.objective_delta for sample in samples], dtype=np.float64),
+        "raw_metric_delta": bootstrap_delta_ci(
+            np.array([sample.raw_metric_delta for sample in samples], dtype=np.float64),
             n_bootstrap=int(bootstrap_block["n_bootstrap"]),
             ci=float(bootstrap_block["ci"]),
             seed=int(bootstrap_block["seed"]) + 4,
         ),
+        "normalized_metric_delta": bootstrap_delta_ci(
+            np.array([sample.normalized_metric_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 5,
+        ),
+        "common_balanced_delta": bootstrap_delta_ci(
+            np.array([sample.common_balanced_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 6,
+        ),
+        "objective_delta": bootstrap_delta_ci(
+            np.array([sample.objective_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 7,
+        ),
     }
-    scale_sensitivity = run_scale_sensitivity(config)
+    scale_sensitivity = run_scale_sensitivity(config, runtime)
+    uniform_scale_sensitivity = scale_sensitivity["uniform_scale_sensitivity"]
+    componentwise_scale_sensitivity = scale_sensitivity["componentwise_scale_sensitivity"]
     csv_path = write_comparison_csv(block["outputs"]["csv_path"], samples)
     summary_path = write_comparison_summary_json(
         block["outputs"]["summary_path"],
         summary,
         bootstrap_ci=bootstrap_ci,
-        scale_sensitivity=scale_sensitivity,
+        uniform_scale_sensitivity=uniform_scale_sensitivity,
+        componentwise_scale_sensitivity=componentwise_scale_sensitivity,
     )
     plot_path = plot_objective_mode_comparison(samples, block["outputs"]["plot_path"])
 
     print("Objective Mode Comparison")
     print(f"n_samples = {summary.n_samples}")
+    print("Primary paired deltas:")
     print(f"detector_win_rate = {summary.detector_win_rate:.6f}")
-    print(f"noise_action_win_rate = {summary.noise_action_win_rate:.6f}")
-    print(f"leakage_win_rate = {summary.leakage_win_rate:.6f}")
-    print(f"objective_win_rate = {summary.objective_win_rate:.6f}")
-    print(f"control_cost_win_rate = {summary.control_cost_win_rate:.6f}")
-    print(f"all_core_win_rate = {summary.all_core_win_rate:.6f}")
     print(f"mean_detector_delta = {summary.mean_detector_delta:.6f}")
     print(
         "bootstrap_detector_delta_95ci = "
         f"({bootstrap_ci['detector_delta'][0]:.6f}, {bootstrap_ci['detector_delta'][1]:.6f})"
     )
+    print(f"noise_action_win_rate = {summary.noise_action_win_rate:.6f}")
     print(f"mean_noise_action_delta = {summary.mean_noise_action_delta:.6f}")
     print(
         "bootstrap_noise_action_delta_95ci = "
         f"({bootstrap_ci['noise_action_delta'][0]:.6f}, {bootstrap_ci['noise_action_delta'][1]:.6f})"
     )
+    print(f"leakage_win_rate = {summary.leakage_win_rate:.6f}")
     print(f"mean_leakage_delta = {summary.mean_leakage_delta:.6f}")
     print(
         "bootstrap_leakage_delta_95ci = "
         f"({bootstrap_ci['leakage_delta'][0]:.6f}, {bootstrap_ci['leakage_delta'][1]:.6f})"
     )
+    print(f"control_cost_win_rate = {summary.control_cost_win_rate:.6f}")
     print(f"mean_control_cost_delta = {summary.mean_control_cost_delta:.6f}")
     print(
         "bootstrap_control_cost_delta_95ci = "
         f"({bootstrap_ci['control_cost_delta'][0]:.6f}, {bootstrap_ci['control_cost_delta'][1]:.6f})"
     )
-    print(f"mean_objective_delta = {summary.mean_objective_delta:.6f}")
+    print("Cross-mode score audit:")
+    print(f"raw_metric_win_rate = {summary.raw_metric_win_rate:.6f}")
+    print(f"mean_raw_metric_delta = {summary.mean_raw_metric_delta:.6f}")
     print(
-        "bootstrap_objective_delta_95ci = "
-        f"({bootstrap_ci['objective_delta'][0]:.6f}, {bootstrap_ci['objective_delta'][1]:.6f})"
+        "bootstrap_raw_metric_delta_95ci = "
+        f"({bootstrap_ci['raw_metric_delta'][0]:.6f}, {bootstrap_ci['raw_metric_delta'][1]:.6f})"
     )
-    print(f"scale_sensitivity = {scale_sensitivity}")
+    print(f"normalized_metric_win_rate = {summary.normalized_metric_win_rate:.6f}")
+    print(f"mean_normalized_metric_delta = {summary.mean_normalized_metric_delta:.6f}")
+    print(
+        "bootstrap_normalized_metric_delta_95ci = "
+        f"({bootstrap_ci['normalized_metric_delta'][0]:.6f}, {bootstrap_ci['normalized_metric_delta'][1]:.6f})"
+    )
+    print(f"common_balanced_win_rate = {summary.common_balanced_win_rate:.6f}")
+    print(f"mean_common_balanced_delta = {summary.mean_common_balanced_delta:.6f}")
+    print(
+        "bootstrap_common_balanced_delta_95ci = "
+        f"({bootstrap_ci['common_balanced_delta'][0]:.6f}, {bootstrap_ci['common_balanced_delta'][1]:.6f})"
+    )
+    print(f"direct_objective_delta_status = {summary.direct_objective_delta_status}")
+    print("Sensitivity:")
+    print(f"uniform_scale_sensitivity = {uniform_scale_sensitivity}")
+    print(f"componentwise_scale_sensitivity = {componentwise_scale_sensitivity}")
+    print("Interpretation:")
+    print(f"normalized_detector_tradeoff = {summary.mean_detector_delta < 0.0}")
+    print(f"normalized_noise_benefit = {summary.mean_noise_action_delta > 0.0}")
+    print(f"normalized_leakage_benefit = {summary.mean_leakage_delta > 0.0}")
+    print(f"common_score_result = {'normalized_advantage' if summary.mean_common_balanced_delta > 0.0 else 'raw_advantage'}")
     print(f"csv_path = {csv_path}")
     print(f"summary_path = {summary_path}")
     print(f"plot_path = {plot_path}")
