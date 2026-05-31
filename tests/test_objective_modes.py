@@ -2,53 +2,53 @@ from __future__ import annotations
 
 import unittest
 
-from hardware.operating_modes import OperatingMode, OperatingModeRegistry
+from hardware.objective_modes import ObjectiveMode, ObjectiveModeRegistry
 
 
-class OperatingModeRegistryTests(unittest.TestCase):
+class ObjectiveModeRegistryTests(unittest.TestCase):
     def test_valid_registry_returns_names_and_mode(self):
-        registry = OperatingModeRegistry(
+        registry = ObjectiveModeRegistry(
             modes=(
-                OperatingMode(
-                    name="legacy_raw",
-                    objective_mode="raw",
+                ObjectiveMode(
+                    name="raw_mode",
+                    mode="raw",
                     transport=1.0,
                     noise_action=0.5,
                     leakage=0.25,
                     control_cost=0.01,
-                    description="legacy",
+                    description="legacy raw",
                 ),
-                OperatingMode(
-                    name="noise_mode",
-                    objective_mode="normalized",
+                ObjectiveMode(
+                    name="calibrated_mode",
+                    mode="calibrated",
                     transport=0.25,
                     noise_action=4.0,
                     leakage=1.0,
                     control_cost=0.01,
-                    description="noise",
+                    description="audit calibrated",
                 ),
             ),
-            default_mode="noise_mode",
+            default_mode="calibrated_mode",
         )
-        self.assertEqual(registry.names(), ["legacy_raw", "noise_mode"])
-        self.assertEqual(registry.get("noise_mode").objective_mode, "normalized")
+        self.assertEqual(registry.names(), ["raw_mode", "calibrated_mode"])
+        self.assertEqual(registry.get("calibrated_mode").mode, "calibrated")
 
     def test_duplicate_mode_names_fail(self):
         with self.assertRaises(ValueError):
-            OperatingModeRegistry(
+            ObjectiveModeRegistry(
                 modes=(
-                    OperatingMode(
+                    ObjectiveMode(
                         name="dup",
-                        objective_mode="raw",
+                        mode="raw",
                         transport=1.0,
                         noise_action=0.5,
                         leakage=0.25,
                         control_cost=0.01,
                         description="a",
                     ),
-                    OperatingMode(
+                    ObjectiveMode(
                         name="dup",
-                        objective_mode="normalized",
+                        mode="normalized",
                         transport=1.0,
                         noise_action=1.0,
                         leakage=1.0,
@@ -61,9 +61,9 @@ class OperatingModeRegistryTests(unittest.TestCase):
 
     def test_non_positive_performance_family_fails(self):
         with self.assertRaises(ValueError):
-            OperatingMode(
+            ObjectiveMode(
                 name="invalid",
-                objective_mode="normalized",
+                mode="normalized",
                 transport=0.0,
                 noise_action=0.0,
                 leakage=0.0,

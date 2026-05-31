@@ -45,36 +45,34 @@ than opaque free vectors.
 
 ## Objective modes
 
-The transition motor now supports two objective interpretations:
+The transition motor now supports three objective interpretations:
 
 - `raw`: optimize the legacy scalar objective directly from absolute transport,
   noise-action, leakage and control cost.
 - `normalized`: optimize gain and reduction terms relative to the default knob
-  state, divided by audit-calibrated normalization scales so detector gain does
-  not silently dominate smaller noise/leakage terms.
+  state, divided by explicit normalization scales so detector gain does not
+  silently dominate smaller noise/leakage terms.
+- `calibrated`: use the normalized scoring path with audit-informed scales and
+  weights chosen from prior synthetic Pareto studies.
 
-Normalized mode does not alter the Hamiltonian model or fixed-grid physics. It
-only changes how the optimizer scores candidate controls.
+Objective modes do not alter the Hamiltonian model or fixed-grid physics. They
+only change how the optimizer scores candidate controls.
 
-## Operating mode registry
+## Objective mode registry
 
-An operating mode registry lets the operator select named motor regimes without
-rewriting YAML weights by hand. The demo registry exposes:
+An objective mode registry lets the operator select named motor regimes without
+rewriting YAML weights by hand. The normalized demo registry exposes:
 
-- `default_normalized`
-- `detector_mode`
-- `noise_mode`
-- `leakage_mode`
-- `cost_mode`
-- `balanced_mode`
-- `legacy_balanced_raw`
+- `raw_mode`
+- `normalized_mode`
+- `calibrated_mode`
 
 The active mode can be selected in config or via:
 
 ```bash
 python run.py transition-motor \
-  --config configs/hardware/transition_motor_demo.yaml \
-  --operating-mode detector_mode
+  --config configs/hardware/transition_motor_normalized_demo.yaml \
+  --objective-mode calibrated_mode
 ```
 
 ## Sensitivity atlas

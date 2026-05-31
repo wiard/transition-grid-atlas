@@ -1071,7 +1071,7 @@ def run_transition_motor_mode(
                 motor_config.objective_weights,
                 n_modes=motor_config.n_transport_modes,
             )
-            if motor_config.objective_mode != "normalized":
+            if motor_config.objective_mode not in {"normalized", "calibrated"}:
                 return raw_metrics
             objective = normalized_motor_objective(
                 baseline_metrics=baseline_raw_metrics,
@@ -1104,15 +1104,15 @@ def run_transition_motor_mode(
     print(f"fixed_grid_edges = {len(grid.edges)}")
     print(f"active_knobs = {registry.names()}")
     print(f"objective_mode = {motor_config.objective_mode}")
-    print(f"selected_operating_mode = {motor_config.selected_operating_mode or 'legacy_objective_weights'}")
-    if motor_config.operating_mode_registry is not None and motor_config.selected_operating_mode is not None:
+    print(f"selected_objective_mode = {motor_config.selected_objective_mode or 'legacy_objective_weights'}")
+    if motor_config.objective_mode_registry is not None and motor_config.selected_objective_mode is not None:
         print(
-            "selected_operating_mode_description = "
-            f"{motor_config.operating_mode_registry.get(motor_config.selected_operating_mode).description}"
+            "selected_objective_mode_description = "
+            f"{motor_config.objective_mode_registry.get(motor_config.selected_objective_mode).description}"
         )
     print(
-        "available_operating_modes = "
-        f"{motor_config.operating_mode_registry.names() if motor_config.operating_mode_registry is not None else ['legacy_objective_weights']}"
+        "available_objective_modes = "
+        f"{motor_config.objective_mode_registry.names() if motor_config.objective_mode_registry is not None else ['legacy_objective_weights']}"
     )
     print(f"objective_weights = {motor_config.objective_weights}")
     if motor_config.normalization_scales is not None:
@@ -1436,10 +1436,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a sensitivity atlas CSV for the transition motor operating point",
     )
     transition_motor_parser.add_argument(
+        "--objective-mode",
         "--operating-mode",
         dest="transition_motor_operating_mode",
         default=None,
-        help="Optional operating mode name from the transition-motor registry",
+        help="Optional objective mode name from the transition-motor registry",
     )
     transition_motor_audit_parser = subparsers.add_parser(
         "transition-motor-audit",

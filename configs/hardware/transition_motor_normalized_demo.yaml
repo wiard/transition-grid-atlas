@@ -78,11 +78,39 @@ transition_motor:
       - [0.0, 0.1, 0.2, 0.5, 1.0, 1.0, 0.5, 0.2, 0.1, 0.0, 0.0, 0.0]
       - [0.0, 0.0, 0.1, 0.3, 0.8, 1.0, 0.8, 0.3, 0.1, 0.0, 0.0, 0.0]
 
-  objective_weights:
-    transport: 1.0
-    noise_action: 0.5
-    leakage: 0.25
-    control_cost: 0.01
+  objective:
+    selected_mode: normalized_mode
+    normalization_scales:
+      transport: 0.050
+      noise_action: 0.0025
+      leakage: 0.0010
+      control_cost: 0.040
+    objective_mode_registry:
+      default_mode: normalized_mode
+      modes:
+        - name: raw_mode
+          mode: raw
+          transport: 1.0
+          noise_action: 0.5
+          leakage: 0.25
+          control_cost: 0.01
+          description: Legacy raw scalar objective for backward-compatible transition-motor runs.
+
+        - name: normalized_mode
+          mode: normalized
+          transport: 1.0
+          noise_action: 1.0
+          leakage: 1.0
+          control_cost: 1.0
+          description: Equal-footing normalized mode that rescales detector, noise, leakage and control cost into comparable numerical bands.
+
+        - name: calibrated_mode
+          mode: calibrated
+          transport: 0.25
+          noise_action: 4.0
+          leakage: 1.0
+          control_cost: 0.01
+          description: Audit-calibrated normalized mode derived from the strongest synthetic noise-focused regime.
 
   optimizer:
     time_min: 0.0
@@ -96,4 +124,4 @@ transition_motor:
     seed: 42
 
   outputs:
-    sensitivity_csv_path: outputs/transition_motor_sensitivity.csv
+    sensitivity_csv_path: outputs/transition_motor_normalized_sensitivity.csv

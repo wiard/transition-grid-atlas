@@ -6,7 +6,7 @@ import numpy as np
 
 from hardware.objectives import (
     MotorMetrics,
-    ObjectiveNormalizationScales,
+    ObjectiveNormalizationScale,
     control_cost,
     evaluate_motor_metrics,
     motor_objective,
@@ -93,7 +93,7 @@ class ObjectiveTests(unittest.TestCase):
             baseline_metrics=baseline,
             candidate_metrics=baseline,
             weights={"transport": 1.0, "noise_action": 1.0, "leakage": 1.0, "control_cost": 1.0},
-            normalization_scales=ObjectiveNormalizationScales(
+            normalization_scales=ObjectiveNormalizationScale(
                 transport=0.05,
                 noise_action=0.0025,
                 leakage=0.0010,
@@ -125,7 +125,7 @@ class ObjectiveTests(unittest.TestCase):
             baseline_metrics=baseline,
             candidate_metrics=candidate,
             weights={"transport": 1.0, "noise_action": 1.0, "leakage": 1.0, "control_cost": 0.5},
-            normalization_scales=ObjectiveNormalizationScales(
+            normalization_scales=ObjectiveNormalizationScale(
                 transport=0.05,
                 noise_action=0.02,
                 leakage=0.02,

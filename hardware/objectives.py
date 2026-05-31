@@ -22,7 +22,7 @@ class MotorMetrics:
 
 
 @dataclass(frozen=True)
-class ObjectiveNormalizationScales:
+class ObjectiveNormalizationScale:
     transport: float
     noise_action: float
     leakage: float
@@ -31,6 +31,9 @@ class ObjectiveNormalizationScales:
     def __post_init__(self) -> None:
         if min(self.transport, self.noise_action, self.leakage, self.control_cost) <= 0.0:
             raise ValueError("all normalization scales must be positive")
+
+
+ObjectiveNormalizationScales = ObjectiveNormalizationScale
 
 
 def projector_from_transport_subspace(
@@ -98,7 +101,7 @@ def normalized_motor_objective(
     baseline_metrics: MotorMetrics,
     candidate_metrics: MotorMetrics,
     weights: dict[str, float],
-    normalization_scales: ObjectiveNormalizationScales,
+    normalization_scales: ObjectiveNormalizationScale,
 ) -> float:
     transport_gain = float(candidate_metrics.transport_efficiency - baseline_metrics.transport_efficiency)
     noise_action_reduction = float(baseline_metrics.noise_action_on_info - candidate_metrics.noise_action_on_info)
