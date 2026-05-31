@@ -41,6 +41,29 @@ Gerelateerde audit- en registry-files:
 - [../../registry/BMW_TPT_clean_residue.json](../../registry/BMW_TPT_clean_residue.json)  
   Registry-entry voor de clean residue.
 
+### Logistics Inventory / Supply Chain
+
+**Residue ID:** `KTA-SUPPLY-INVENTORY-001`  **Status:** `candidate_clean`  **Class:** `information_coherence`
+
+Files:
+
+- [Supply_Inventory_Transition_Motor.KTA.md](./Supply_Inventory_Transition_Motor.KTA.md)  
+  Hoofdresidue voor de logistics inventory transition motor.
+
+- [supply_transition_motor_setup.md](./supply_transition_motor_setup.md)  
+  Transition Motor configuratie voor voorraadbeheer en replenishment-governance.
+
+Gerelateerde audit- en registry-files:
+
+- [../../audit/supply_reversibility_score.yaml](../../audit/supply_reversibility_score.yaml)  
+  Auditdefinitie voor reversibiliteit en voorraadcoherentie onder onzekerheid.
+
+- [../../audit/supply_final_residue.md](../../audit/supply_final_residue.md)  
+  Korte final-residue beoordeling voor de supply-chain seed.
+
+- [../../registry/supply_inventory_clean_residue.json](../../registry/supply_inventory_clean_residue.json)  
+  Registry-entry voor de supply inventory clean residue.
+
 ## Artifact policy
 
 Residue-artefacten in deze map moeten aan de volgende regels voldoen:
@@ -60,3 +83,4 @@ Residue-artefacten in deze map moeten aan de volgende regels voldoen:
 | Residue ID | Grid | Class | Status |
 |---|---|---|---|
 | `KTA-BMW-TPT-VVT-001` | BMW TwinPower Turbo / Valvetronic | `combustion_phase_coherence` | `provisionally_clean` |
+| `KTA-SUPPLY-INVENTORY-001` | Logistics Inventory / Supply Chain | `information_coherence` | `candidate_clean` |

@@ -1,0 +1,54 @@
+{
+  "residue_id": "KTA-SUPPLY-INVENTORY-001",
+  "residue_class": "information_coherence",
+  "domain": "logistics_inventory_control",
+  "transition_motor": "H_Supply(theta)",
+  "hardware_policy": "fixed_grid_invariant",
+  "physical_modifications": "forbidden",
+  "solver_changes": "forbidden",
+  "post_correction": "forbidden",
+  "primary_target": "minimum_logistics_entropy_transition",
+  "fixed_grid": {
+    "warehouse_capacity": "immutable",
+    "physical_layout": "immutable",
+    "supplier_lead_time_contract": "immutable",
+    "sku_topology": "immutable",
+    "review_calendar": "immutable"
+  },
+  "control_surface": {
+    "service_level_target": "service_phase_anchor",
+    "review_period": "observation_cadence",
+    "reorder_point": "collapse_threshold",
+    "safety_stock_ratio": "uncertainty_buffer",
+    "order_up_to_level": "target_inventory_band",
+    "batch_size_aggregation": "capital_wave_packet",
+    "emergency_replenishment_threshold": "irreversibility_boundary"
+  },
+  "audit_metrics": {
+    "fill_rate": "service_coherence",
+    "stockout_rate": "availability_failure",
+    "carrying_cost": "capital_entropy",
+    "stockout_cost": "service_entropy",
+    "recovery_time_after_spike": "reversibility_proxy",
+    "capacity_violation_count": "grid_boundary_violation",
+    "emergency_order_rate": "irreversibility_signal",
+    "theta_drift": "governance_noise"
+  },
+  "clean_residue_definition": {
+    "service": "target_service_level_met_without_structural_overstock",
+    "cost": "carrying_cost_and_stockout_cost_balanced_within_tolerance",
+    "recovery": "returns_to_target_inventory_band_after_spike",
+    "capacity": "no_fixed_grid_boundary_violation",
+    "governance": "theta_changes_are_auditable_and_registry_bound"
+  },
+  "rejection_signature": [
+    "service_level_met_by_chronic_overstock",
+    "stockout_reduction_with_unbounded_carrying_cost",
+    "recovery_depends_on_emergency_replenishment",
+    "warehouse_capacity_violation",
+    "manual_reorder_point_tuning_without_audit_trace",
+    "theta_drift_exceeds_boundary"
+  ],
+  "registry_status": "candidate_clean",
+  "next_atlas_action": "validate_against_six_month_inventory_history"
+}
