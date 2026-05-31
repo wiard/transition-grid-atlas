@@ -50,6 +50,13 @@ from hardware.ensemble_statistics import (
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
+from hardware.motor_pareto import (
+    plot_pareto_results,
+    run_pareto_weight_sweep,
+    transition_motor_pareto_from_dict,
+    write_pareto_csv,
+    write_pareto_summary_json,
+)
 from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
 from hardware.photonic_wafer import (
     disorder_strength_from_fabrication,
@@ -1204,6 +1211,43 @@ def run_transition_motor_ensemble_stats_mode(
     return 0
 
 
+def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
+    results, summary = run_pareto_weight_sweep(config)
+    parsed = transition_motor_pareto_from_dict(config)
+    csv_path = write_pareto_csv(parsed.outputs["csv_path"], results)
+    summary_path = write_pareto_summary_json(parsed.outputs["summary_path"], results, summary)
+    plot_path = plot_pareto_results(results, parsed.outputs["plot_path"])
+
+    print("Transition Motor Pareto Sweep")
+    print(f"n_weight_sets = {summary.n_weight_sets}")
+    print(f"n_samples_per_weight_set = {results[0].n_samples if results else 0}")
+    print(f"pareto_optimal_names = {summary.pareto_optimal_names}")
+    print(f"best_detector_name = {summary.best_detector_name}")
+    print(f"best_noise_action_name = {summary.best_noise_action_name}")
+    print(f"best_leakage_name = {summary.best_leakage_name}")
+    print(f"best_balanced_name = {summary.best_balanced_name}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    for result in results:
+        print(
+            f"{result.name} = "
+            f"{{'success_rate': {result.success_rate:.6f}, "
+            f"'mean_detector_success_gain': {result.mean_detector_success_gain:.6f}, "
+            f"'mean_noise_action_reduction': {result.mean_noise_action_reduction:.6f}, "
+            f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
+            f"'mean_best_control_cost': {result.mean_best_control_cost:.6f}, "
+            f"'mean_saturated_knobs': {result.mean_saturated_knobs:.6f}, "
+            f"'pareto_optimal': {str(result.is_pareto_optimal).lower()}}}"
+        )
+    print(
+        "interpretation = This Pareto sweep tests how objective weights shift the transition motor "
+        "between detector-output optimization, noise-action reduction, leakage control and actuator cost. "
+        "It is synthetic ensemble analysis, not experimental validation or full QEC."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1291,6 +1335,16 @@ def build_parser() -> argparse.ArgumentParser:
     transition_motor_ensemble_stats_parser.add_argument("--csv", required=True, help="Input ensemble CSV path")
     transition_motor_ensemble_stats_parser.add_argument("--out-json", required=True, help="Output statistics JSON path")
     transition_motor_ensemble_stats_parser.add_argument("--out-plot", required=True, help="Output statistics plot path")
+    transition_motor_pareto_parser = subparsers.add_parser(
+        "transition-motor-pareto",
+        help="Run an objective-weight Pareto sweep for the transition motor",
+    )
+    transition_motor_pareto_parser.add_argument(
+        "--config",
+        dest="transition_motor_pareto_config",
+        default=None,
+        help="Optional transition-motor Pareto YAML path; accepted after the subcommand for operator convenience",
+    )
     wafer_ensemble_parser = subparsers.add_parser(
         "wafer-ensemble",
         help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
@@ -1321,6 +1375,7 @@ def main() -> int:
         or getattr(args, "transition_motor_config", None)
         or getattr(args, "transition_motor_audit_config", None)
         or getattr(args, "transition_motor_ensemble_config", None)
+        or getattr(args, "transition_motor_pareto_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
     )
@@ -1359,6 +1414,8 @@ def main() -> int:
             out_json=args.out_json,
             out_plot=args.out_plot,
         )
+    if args.command == "transition-motor-pareto":
+        return run_transition_motor_pareto_mode(config)
     if args.command == "wafer-ensemble":
         return run_wafer_ensemble_mode(config)
     if args.command == "lab":
