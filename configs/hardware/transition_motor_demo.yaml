@@ -78,11 +78,71 @@ transition_motor:
       - [0.0, 0.1, 0.2, 0.5, 1.0, 1.0, 0.5, 0.2, 0.1, 0.0, 0.0, 0.0]
       - [0.0, 0.0, 0.1, 0.3, 0.8, 1.0, 0.8, 0.3, 0.1, 0.0, 0.0, 0.0]
 
-  objective_weights:
-    transport: 1.0
-    noise_action: 0.5
-    leakage: 0.25
-    control_cost: 0.01
+  objective:
+    selected_mode: default_normalized
+    normalization_scales:
+      transport: 0.050
+      noise_action: 0.0025
+      leakage: 0.0010
+      control_cost: 0.040
+    operating_mode_registry:
+      default_mode: default_normalized
+      modes:
+        - name: legacy_balanced_raw
+          objective_mode: raw
+          transport: 1.0
+          noise_action: 0.5
+          leakage: 0.25
+          control_cost: 0.01
+          description: Legacy raw scalar objective for backward-compatible transition-motor runs.
+
+        - name: default_normalized
+          objective_mode: normalized
+          transport: 0.25
+          noise_action: 4.0
+          leakage: 1.0
+          control_cost: 0.01
+          description: Audit-derived default mode that prioritizes robust noise-action reduction while preserving detector success.
+
+        - name: detector_mode
+          objective_mode: normalized
+          transport: 3.0
+          noise_action: 0.0
+          leakage: 0.0
+          control_cost: 0.005
+          description: Detector-success mode that pushes the motor toward maximum output-channel transport gain.
+
+        - name: noise_mode
+          objective_mode: normalized
+          transport: 0.25
+          noise_action: 4.0
+          leakage: 1.0
+          control_cost: 0.01
+          description: Noise-focused mode that reproduces the strongest normalized noise-action regime from the Pareto audit.
+
+        - name: leakage_mode
+          objective_mode: normalized
+          transport: 0.25
+          noise_action: 1.0
+          leakage: 4.0
+          control_cost: 0.01
+          description: Leakage-guard mode for suppressing transport-subspace escape while retaining useful detector gain.
+
+        - name: cost_mode
+          objective_mode: normalized
+          transport: 1.0
+          noise_action: 0.5
+          leakage: 0.25
+          control_cost: 0.20
+          description: Cost-sensitive mode that rewards lower actuator effort and reduced bound pressure.
+
+        - name: balanced_mode
+          objective_mode: normalized
+          transport: 1.0
+          noise_action: 1.0
+          leakage: 1.0
+          control_cost: 1.0
+          description: Analysis-balanced normalized mode for comparing detector, noise, leakage and cost on similar scales.
 
   optimizer:
     time_min: 0.0

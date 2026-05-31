@@ -43,6 +43,40 @@ than opaque free vectors.
 - control_cost
 - objective
 
+## Objective modes
+
+The transition motor now supports two objective interpretations:
+
+- `raw`: optimize the legacy scalar objective directly from absolute transport,
+  noise-action, leakage and control cost.
+- `normalized`: optimize gain and reduction terms relative to the default knob
+  state, divided by audit-calibrated normalization scales so detector gain does
+  not silently dominate smaller noise/leakage terms.
+
+Normalized mode does not alter the Hamiltonian model or fixed-grid physics. It
+only changes how the optimizer scores candidate controls.
+
+## Operating mode registry
+
+An operating mode registry lets the operator select named motor regimes without
+rewriting YAML weights by hand. The demo registry exposes:
+
+- `default_normalized`
+- `detector_mode`
+- `noise_mode`
+- `leakage_mode`
+- `cost_mode`
+- `balanced_mode`
+- `legacy_balanced_raw`
+
+The active mode can be selected in config or via:
+
+```bash
+python run.py transition-motor \
+  --config configs/hardware/transition_motor_demo.yaml \
+  --operating-mode detector_mode
+```
+
 ## Sensitivity atlas
 
 Finite-difference sensitivities show which knobs affect which metrics most

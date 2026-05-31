@@ -50,6 +50,7 @@ from hardware.ensemble_statistics import (
 from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
 from hardware.motor_audit import run_transition_motor_bound_audit
 from hardware.motor_ensemble import run_transition_motor_ensemble_study
+from hardware.objectives import evaluate_motor_metrics, normalized_motor_objective
 from hardware.motor_pareto import (
     plot_pareto_results,
     run_pareto_weight_sweep,
@@ -1020,7 +1021,15 @@ def run_transition_motor_mode(
     config: dict[str, Any],
     *,
     report_sensitivity: bool = False,
+    operating_mode: str | None = None,
 ) -> int:
+    if operating_mode:
+        config = dict(config)
+        block = dict(config["transition_motor"])
+        objective_block = dict(block.get("objective", {}))
+        objective_block["selected_mode"] = operating_mode
+        block["objective"] = objective_block
+        config["transition_motor"] = block
     motor_config, outputs = transition_motor_config_from_dict(config)
     grid = motor_config.grid
     registry = motor_config.knob_registry
@@ -1038,12 +1047,22 @@ def run_transition_motor_mode(
     sensitivity_path = None
     if report_sensitivity or outputs.get("sensitivity_csv_path"):
         times = np.linspace(motor_config.time_min, motor_config.time_max, motor_config.n_time_samples, dtype=np.float64)
+        baseline_H = build_control_hamiltonian(H0, grid, result.baseline_theta, basis, registry)
+        baseline_raw_metrics = evaluate_motor_metrics(
+            baseline_H,
+            motor_config.noise_profiles,
+            grid,
+            result.baseline_theta,
+            times,
+            motor_config.objective_weights,
+            n_modes=motor_config.n_transport_modes,
+        )
 
         def metrics_fn(theta: dict[str, float]):
             H = build_control_hamiltonian(H0, grid, theta, basis, registry)
-            from hardware.objectives import evaluate_motor_metrics
+            from dataclasses import replace
 
-            return evaluate_motor_metrics(
+            raw_metrics = evaluate_motor_metrics(
                 H,
                 motor_config.noise_profiles,
                 grid,
@@ -1052,6 +1071,15 @@ def run_transition_motor_mode(
                 motor_config.objective_weights,
                 n_modes=motor_config.n_transport_modes,
             )
+            if motor_config.objective_mode != "normalized":
+                return raw_metrics
+            objective = normalized_motor_objective(
+                baseline_metrics=baseline_raw_metrics,
+                candidate_metrics=raw_metrics,
+                weights=motor_config.objective_weights,
+                normalization_scales=motor_config.normalization_scales,
+            )
+            return replace(raw_metrics, objective=objective)
 
         entries = compute_sensitivity_matrix(
             metrics_fn,
@@ -1075,6 +1103,26 @@ def run_transition_motor_mode(
     print(f"fixed_grid_sites = {grid.n_sites}")
     print(f"fixed_grid_edges = {len(grid.edges)}")
     print(f"active_knobs = {registry.names()}")
+    print(f"objective_mode = {motor_config.objective_mode}")
+    print(f"selected_operating_mode = {motor_config.selected_operating_mode or 'legacy_objective_weights'}")
+    if motor_config.operating_mode_registry is not None and motor_config.selected_operating_mode is not None:
+        print(
+            "selected_operating_mode_description = "
+            f"{motor_config.operating_mode_registry.get(motor_config.selected_operating_mode).description}"
+        )
+    print(
+        "available_operating_modes = "
+        f"{motor_config.operating_mode_registry.names() if motor_config.operating_mode_registry is not None else ['legacy_objective_weights']}"
+    )
+    print(f"objective_weights = {motor_config.objective_weights}")
+    if motor_config.normalization_scales is not None:
+        print(
+            "normalization_scales = "
+            f"{{'transport': {motor_config.normalization_scales.transport:.6f}, "
+            f"'noise_action': {motor_config.normalization_scales.noise_action:.6f}, "
+            f"'leakage': {motor_config.normalization_scales.leakage:.6f}, "
+            f"'control_cost': {motor_config.normalization_scales.control_cost:.6f}}}"
+        )
     print(f"baseline_transport_efficiency = {result.baseline_metrics.transport_efficiency:.6f}")
     print(f"best_transport_efficiency = {result.best_metrics.transport_efficiency:.6f}")
     print(f"baseline_noise_action_on_info = {result.baseline_metrics.noise_action_on_info:.6f}")
@@ -1387,6 +1435,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write a sensitivity atlas CSV for the transition motor operating point",
     )
+    transition_motor_parser.add_argument(
+        "--operating-mode",
+        dest="transition_motor_operating_mode",
+        default=None,
+        help="Optional operating mode name from the transition-motor registry",
+    )
     transition_motor_audit_parser = subparsers.add_parser(
         "transition-motor-audit",
         help="Audit transition motor bound pressure, ablations, limits and seed stability",
@@ -1493,7 +1547,11 @@ def main() -> int:
     if args.command == "transition-tune":
         return run_transition_tune_mode(config)
     if args.command == "transition-motor":
-        return run_transition_motor_mode(config, report_sensitivity=args.report_sensitivity)
+        return run_transition_motor_mode(
+            config,
+            report_sensitivity=args.report_sensitivity,
+            operating_mode=getattr(args, "transition_motor_operating_mode", None),
+        )
     if args.command == "transition-motor-audit":
         return run_transition_motor_audit_mode(config)
     if args.command == "transition-motor-ensemble":

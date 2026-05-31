@@ -6,12 +6,13 @@ import numpy as np
 
 from hardware.control_basis import make_control_basis
 from hardware.control_knobs import ControlKnob, KnobRegistry
-from hardware.objectives import evaluate_motor_metrics
+from hardware.objectives import ObjectiveNormalizationScales, evaluate_motor_metrics
 from hardware.transition_motor import (
     build_control_hamiltonian,
     finite_difference_gradient,
     projected_gradient_ascent,
     random_restart_transition_motor_search,
+    transition_motor_config_from_dict,
 )
 from hardware.transition_tuner import FixedGrid, build_base_hamiltonian, noise_operators_from_profiles
 
@@ -108,5 +109,109 @@ class TransitionMotorTests(unittest.TestCase):
             seed = 42
 
         result = random_restart_transition_motor_search(H0, grid, noise_ops, basis, registry, Config())
+        self.assertGreaterEqual(result.best_metrics.objective + 1.0e-12, result.baseline_metrics.objective)
+        registry.validate_theta(result.best_theta)
+
+    def test_transition_motor_config_resolves_operating_mode_registry(self):
+        config, _ = transition_motor_config_from_dict(
+            {
+                "transition_motor": {
+                    "grid": {
+                        "n_sites": 4,
+                        "edges": [[0, 1], [1, 2], [2, 3]],
+                        "base_coupling": 1.0,
+                        "input_index": 0,
+                        "target_indices": [2, 3],
+                    },
+                    "knobs": [
+                        {
+                            "name": "grad",
+                            "family": "onsite_phase",
+                            "symbol": "g",
+                            "basis_name": "linear_gradient",
+                            "min_value": -0.1,
+                            "max_value": 0.1,
+                            "default": 0.0,
+                            "units": "arb",
+                            "description": "grad",
+                            "hardware_meaning": "grad",
+                        }
+                    ],
+                    "noise": {"profiles": [[0.0, 0.2, 0.1, 0.0]]},
+                    "objective": {
+                        "selected_mode": "noise_mode",
+                        "normalization_scales": {
+                            "transport": 0.05,
+                            "noise_action": 0.0025,
+                            "leakage": 0.0010,
+                            "control_cost": 0.04,
+                        },
+                        "operating_mode_registry": {
+                            "default_mode": "detector_mode",
+                            "modes": [
+                                {
+                                    "name": "detector_mode",
+                                    "objective_mode": "normalized",
+                                    "transport": 3.0,
+                                    "noise_action": 0.0,
+                                    "leakage": 0.0,
+                                    "control_cost": 0.005,
+                                    "description": "detector",
+                                },
+                                {
+                                    "name": "noise_mode",
+                                    "objective_mode": "normalized",
+                                    "transport": 0.25,
+                                    "noise_action": 4.0,
+                                    "leakage": 1.0,
+                                    "control_cost": 0.01,
+                                    "description": "noise",
+                                },
+                            ],
+                        },
+                    },
+                    "optimizer": {
+                        "time_min": 0.0,
+                        "time_max": 8.0,
+                        "n_time_samples": 20,
+                        "n_transport_modes": 2,
+                        "finite_diff_eps": 1.0e-4,
+                        "optimizer_steps": 5,
+                        "optimizer_step_size": 0.05,
+                        "random_restarts": 1,
+                        "seed": 42,
+                    },
+                }
+            }
+        )
+        self.assertEqual(config.objective_mode, "normalized")
+        self.assertEqual(config.selected_operating_mode, "noise_mode")
+        self.assertEqual(config.objective_weights["noise_action"], 4.0)
+        self.assertEqual(config.operating_mode_registry.names(), ["detector_mode", "noise_mode"])
+
+    def test_random_restart_search_supports_normalized_objective_mode(self):
+        H0, grid, basis, registry, noise_ops, metrics_fn = self.build_metrics_objective()
+
+        class Config:
+            objective_weights = {"transport": 0.25, "noise_action": 4.0, "leakage": 1.0, "control_cost": 0.01}
+            objective_mode = "normalized"
+            normalization_scales = ObjectiveNormalizationScales(
+                transport=0.05,
+                noise_action=0.0025,
+                leakage=0.0010,
+                control_cost=0.04,
+            )
+            time_min = 0.0
+            time_max = 12.0
+            n_time_samples = 40
+            n_transport_modes = 2
+            finite_diff_eps = 1.0e-4
+            optimizer_steps = 10
+            optimizer_step_size = 0.05
+            random_restarts = 2
+            seed = 42
+
+        result = random_restart_transition_motor_search(H0, grid, noise_ops, basis, registry, Config())
+        self.assertAlmostEqual(result.baseline_metrics.objective, 0.0, places=10)
         self.assertGreaterEqual(result.best_metrics.objective + 1.0e-12, result.baseline_metrics.objective)
         registry.validate_theta(result.best_theta)

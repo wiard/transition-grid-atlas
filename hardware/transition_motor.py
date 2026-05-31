@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from hardware.control_basis import ControlBasis, make_control_basis
 from hardware.control_knobs import KnobRegistry, knob_registry_from_dicts
-from hardware.objectives import MotorMetrics, evaluate_motor_metrics
+from hardware.objectives import (
+    MotorMetrics,
+    ObjectiveNormalizationScales,
+    evaluate_motor_metrics,
+    normalized_motor_objective,
+)
+from hardware.operating_modes import OperatingModeRegistry, operating_mode_registry_from_dict
 from hardware.sensitivity import compute_sensitivity_matrix, top_sensitivities
 from hardware.transition_tuner import FixedGrid, build_base_hamiltonian, fixed_grid_from_dict, noise_operators_from_profiles
 
@@ -18,6 +24,10 @@ class TransitionMotorConfig:
     grid: FixedGrid
     knob_registry: KnobRegistry
     objective_weights: dict[str, float]
+    objective_mode: str
+    normalization_scales: ObjectiveNormalizationScales | None
+    selected_operating_mode: str | None
+    operating_mode_registry: OperatingModeRegistry | None
     noise_profiles: list[np.ndarray]
     time_min: float
     time_max: float
@@ -45,10 +55,50 @@ def transition_motor_config_from_dict(data: dict[str, object]) -> tuple[Transiti
     grid = fixed_grid_from_dict(dict(block["grid"]))
     registry = knob_registry_from_dicts(list(block["knobs"]))
     optimizer = dict(block["optimizer"])
+    objective_mode = "raw"
+    objective_weights = {str(k): float(v) for k, v in dict(block.get("objective_weights", {})).items()}
+    normalization_scales: ObjectiveNormalizationScales | None = None
+    selected_operating_mode: str | None = None
+    operating_mode_registry: OperatingModeRegistry | None = None
+
+    if "objective" in block:
+        objective_block = dict(block["objective"])
+        selected_operating_mode = str(objective_block.get("selected_mode", "")).strip() or None
+        if "normalization_scales" in objective_block:
+            scales = dict(objective_block["normalization_scales"])
+            normalization_scales = ObjectiveNormalizationScales(
+                transport=float(scales["transport"]),
+                noise_action=float(scales["noise_action"]),
+                leakage=float(scales["leakage"]),
+                control_cost=float(scales["control_cost"]),
+            )
+        if "operating_mode_registry" in objective_block:
+            operating_mode_registry = operating_mode_registry_from_dict(dict(objective_block["operating_mode_registry"]))
+            resolved_name = selected_operating_mode or operating_mode_registry.default_mode
+            mode = operating_mode_registry.get(resolved_name)
+            selected_operating_mode = mode.name
+            objective_mode = str(mode.objective_mode)
+            objective_weights = mode.weights_dict()
+        elif "weights" in objective_block:
+            objective_mode = str(objective_block.get("mode", "raw"))
+            objective_weights = {str(k): float(v) for k, v in dict(objective_block["weights"]).items()}
+        elif objective_weights:
+            objective_mode = str(objective_block.get("mode", "raw"))
+    if objective_mode not in {"raw", "normalized"}:
+        raise ValueError("transition-motor objective mode must be 'raw' or 'normalized'")
+    if objective_mode == "normalized" and normalization_scales is None:
+        raise ValueError("normalized transition-motor mode requires normalization_scales")
+    elif not objective_weights:
+        objective_weights = {"transport": 1.0, "noise_action": 0.5, "leakage": 0.25, "control_cost": 0.01}
+
     config = TransitionMotorConfig(
         grid=grid,
         knob_registry=registry,
-        objective_weights={str(k): float(v) for k, v in dict(block["objective_weights"]).items()},
+        objective_weights=objective_weights,
+        objective_mode=objective_mode,
+        normalization_scales=normalization_scales,
+        selected_operating_mode=selected_operating_mode,
+        operating_mode_registry=operating_mode_registry,
         noise_profiles=noise_operators_from_profiles(list(dict(block["noise"])["profiles"])),
         time_min=float(optimizer["time_min"]),
         time_max=float(optimizer["time_max"]),
@@ -169,10 +219,12 @@ def random_restart_transition_motor_search(
     registry: KnobRegistry,
     config: TransitionMotorConfig,
 ) -> TransitionMotorResult:
+    objective_mode = str(getattr(config, "objective_mode", "raw"))
+    normalization_scales = getattr(config, "normalization_scales", None)
     times = np.linspace(config.time_min, config.time_max, config.n_time_samples, dtype=np.float64)
     baseline_theta = registry.defaults()
 
-    def metrics_fn(theta: dict[str, float]) -> MotorMetrics:
+    def raw_metrics(theta: dict[str, float]) -> MotorMetrics:
         H = build_control_hamiltonian(H0, grid, theta, basis, registry)
         return evaluate_motor_metrics(
             H,
@@ -184,10 +236,28 @@ def random_restart_transition_motor_search(
             n_modes=config.n_transport_modes,
         )
 
+    baseline_raw_metrics = raw_metrics(baseline_theta)
+
+    def apply_objective_mode(metrics: MotorMetrics) -> MotorMetrics:
+        if objective_mode == "normalized":
+            if normalization_scales is None:
+                raise ValueError("normalized objective mode requires normalization_scales")
+            objective = normalized_motor_objective(
+                baseline_metrics=baseline_raw_metrics,
+                candidate_metrics=metrics,
+                weights=config.objective_weights,
+                normalization_scales=normalization_scales,
+            )
+            return replace(metrics, objective=objective)
+        return metrics
+
+    def metrics_fn(theta: dict[str, float]) -> MotorMetrics:
+        return apply_objective_mode(raw_metrics(theta))
+
     def objective_fn(theta: dict[str, float]) -> float:
         return float(metrics_fn(theta).objective)
 
-    baseline_metrics = metrics_fn(baseline_theta)
+    baseline_metrics = apply_objective_mode(baseline_raw_metrics)
     best_theta = dict(baseline_theta)
     best_metrics = baseline_metrics
     rng = np.random.default_rng(config.seed)
