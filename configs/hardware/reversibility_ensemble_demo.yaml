@@ -1,0 +1,62 @@
+reversibility_ensemble:
+  operating_modes:
+    - name: detector_max
+      config: configs/hardware/transition_motor_pareto_reversibility_demo.yaml
+      preset_name: detector_max
+    - name: balanced
+      config: configs/hardware/transition_motor_pareto_reversibility_demo.yaml
+      preset_name: balanced
+    - name: cost_sensitive
+      config: configs/hardware/transition_motor_pareto_reversibility_demo.yaml
+      preset_name: cost_sensitive
+    - name: normalized_noise_strong
+      config: configs/hardware/transition_motor_pareto_reversibility_demo.yaml
+      preset_name: normalized_noise_strong
+
+  grid:
+    n_sites: 12
+    edges:
+      - [0, 1]
+      - [1, 2]
+      - [2, 3]
+      - [3, 4]
+      - [4, 5]
+      - [5, 6]
+      - [6, 7]
+      - [7, 8]
+      - [8, 9]
+      - [9, 10]
+      - [10, 11]
+    base_coupling: 1.0
+    input_index: 0
+    target_indices: [10, 11]
+
+  fabrication_disorder:
+    n_samples: 25
+    onsite_sigma: 0.08
+    correlation_length_sites: 2.0
+    seed: 123
+
+  phase_noise:
+    n_profiles_per_sample: 3
+    profile_sigma: 1.0
+    correlation_length_sites: 2.0
+    seed: 456
+
+  dephasing_strengths: [0.0, 0.05, 0.10]
+
+  time:
+    time_min: 0.0
+    time_max: 20.0
+    n_time_samples: 100
+    time_step_multiplier: 1.0
+    forward_time_selection: peak_target
+
+  selection:
+    detector_tolerance_fraction: 0.05
+
+  outputs:
+    csv_path: outputs/reversibility_ensemble.csv
+    summary_path: outputs/reversibility_ensemble_summary.json
+    plot_path: results/renders/reversibility_ensemble.png
+

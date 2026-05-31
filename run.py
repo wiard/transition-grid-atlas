@@ -104,6 +104,13 @@ from hardware.reversibility_audit import (
     write_reversibility_csv,
     write_reversibility_summary_json,
 )
+from hardware.reversibility_ensemble import (
+    plot_reversibility_ensemble,
+    run_reversibility_ensemble,
+    summarize_reversibility_ensemble,
+    write_reversibility_ensemble_csv,
+    write_reversibility_ensemble_summary_json,
+)
 from hardware.sensitivity import compute_sensitivity_matrix, write_sensitivity_csv
 from hardware.wafer_ensemble import run_wafer_ensemble_study
 from interface.visualiser import render_probability_animation
@@ -1437,6 +1444,40 @@ def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
     return 0
 
 
+def run_reversibility_ensemble_mode(config: dict[str, Any]) -> int:
+    results, summary = run_reversibility_ensemble(config)
+    selection = dict(config["reversibility_ensemble"]["selection"])
+    outputs = dict(config["reversibility_ensemble"]["outputs"])
+    mode_summaries, _ = summarize_reversibility_ensemble(
+        results,
+        detector_tolerance_fraction=float(selection["detector_tolerance_fraction"]),
+    )
+    csv_path = write_reversibility_ensemble_csv(outputs["csv_path"], results, mode_summaries)
+    summary_path = write_reversibility_ensemble_summary_json(outputs["summary_path"], summary, mode_summaries)
+    plot_path = plot_reversibility_ensemble(mode_summaries, summary, outputs["plot_path"])
+
+    print("Reversibility Ensemble")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"operating_modes = {summary.operating_modes}")
+    print(f"dephasing_strengths = {summary.dephasing_strengths}")
+    print(f"best_reversibility_by_dephasing = {summary.best_reversibility_by_dephasing}")
+    print(f"lowest_open_loss_by_dephasing = {summary.lowest_open_loss_by_dephasing}")
+    print(f"best_detector_stability_by_dephasing = {summary.best_detector_stability_by_dephasing}")
+    print(f"preferred_mode_by_dephasing = {summary.preferred_mode_by_dephasing}")
+    print(f"detector_reversibility_corr_by_dephasing = {summary.detector_reversibility_corr_by_dephasing}")
+    print(f"detector_loss_corr_by_dephasing = {summary.detector_loss_corr_by_dephasing}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether operating modes with higher "
+        "reversibility_score remain more robust under sampled wafer disorder and dephasing. "
+        "It is synthetic validation of instrumental reversibility metadata, not experimental "
+        "validation or a claim about time reversal."
+    )
+    return 0
+
+
 def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
     runtime = execute_objective_mode_comparison(config)
     samples = runtime.samples
@@ -1767,6 +1808,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional reversibility-audit YAML path; accepted after the subcommand for operator convenience",
     )
+    reversibility_ensemble_parser = subparsers.add_parser(
+        "reversibility-ensemble",
+        help="Run synthetic ensemble validation for reversibility-aware operating modes",
+    )
+    reversibility_ensemble_parser.add_argument(
+        "--config",
+        dest="reversibility_ensemble_config",
+        default=None,
+        help="Optional reversibility-ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
     time_resolution_audit_parser = subparsers.add_parser(
         "time-resolution-audit",
         help="Audit objective-mode comparison sensitivity to Hamiltonian time-grid resolution",
@@ -1811,6 +1862,7 @@ def main() -> int:
         or getattr(args, "transition_motor_pareto_audit_config", None)
         or getattr(args, "objective_mode_comparison_config", None)
         or getattr(args, "reversibility_audit_config", None)
+        or getattr(args, "reversibility_ensemble_config", None)
         or getattr(args, "time_resolution_audit_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
@@ -1863,6 +1915,8 @@ def main() -> int:
         return run_objective_mode_comparison_mode(config)
     if args.command == "reversibility-audit":
         return run_reversibility_audit_mode(config)
+    if args.command == "reversibility-ensemble":
+        return run_reversibility_ensemble_mode(config)
     if args.command == "time-resolution-audit":
         return run_time_resolution_audit_mode(config)
     if args.command == "wafer-ensemble":
