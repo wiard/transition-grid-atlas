@@ -14,6 +14,14 @@ Een residue in deze map is geen solver-implementatie en geen hardware-wijzigings
 ### BMW TwinPower Turbo / Valvetronic
 **Residue ID:** `KTA-BMW-TPT-VVT-001`  **Status:** `provisionally_clean`  **Class:** `combustion_phase_coherence`
 
+#### Figure
+
+![KTA Residue Atlas Seed](./assets/bmw_tpt_vvt_residue_seed.png)
+
+Source: [`bmw_tpt_vvt_residue_seed.tex`](./assets/bmw_tpt_vvt_residue_seed.tex) · Render: [`bmw_tpt_vvt_residue_seed.pdf`](./assets/bmw_tpt_vvt_residue_seed.pdf)
+
+This figure shows the fixed-grid transition flow for `KTA-BMW-TPT-VVT-001`: physical invariant, transition motor, reversibility audit, registry binding, control surface, audit surface, and repo proof.
+
 Files:
 
 - [BMW_TwinPowerTurbo_Valvetronic.KTA.md](./BMW_TwinPowerTurbo_Valvetronic.KTA.md)  
