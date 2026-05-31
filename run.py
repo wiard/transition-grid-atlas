@@ -98,6 +98,12 @@ from hardware.time_resolution_audit import (
     write_time_resolution_csv,
     write_time_resolution_summary_json,
 )
+from hardware.reversibility_audit import (
+    plot_reversibility_audit,
+    run_reversibility_audit,
+    write_reversibility_csv,
+    write_reversibility_summary_json,
+)
 from hardware.sensitivity import compute_sensitivity_matrix, write_sensitivity_csv
 from hardware.wafer_ensemble import run_wafer_ensemble_study
 from interface.visualiser import render_probability_animation
@@ -1583,6 +1589,35 @@ def run_time_resolution_audit_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_reversibility_audit_mode(config: dict[str, Any]) -> int:
+    coherent_results, open_results, summary = run_reversibility_audit(config)
+    block = dict(config["reversibility_audit"])
+    csv_path = write_reversibility_csv(block["outputs"]["csv_path"], coherent_results, open_results)
+    summary_path = write_reversibility_summary_json(block["outputs"]["summary_path"], summary)
+    plot_path = plot_reversibility_audit(coherent_results, open_results, block["outputs"]["plot_path"])
+
+    print("Reversibility Audit")
+    print(f"operating_modes = {sorted({result.mode_name for result in coherent_results})}")
+    print(f"time_step_multipliers = {sorted({float(result.time_step_multiplier) for result in coherent_results})}")
+    print(f"dephasing_strengths = {sorted({float(result.dephasing_strength) for result in open_results})}")
+    print(f"coherent_all_passed = {summary.coherent_all_passed}")
+    print(f"min_coherent_fidelity = {summary.min_coherent_fidelity:.6f}")
+    print(f"max_coherent_l2_error = {summary.max_coherent_l2_error:.6e}")
+    print(f"max_coherent_loss_delta = {summary.max_coherent_loss_delta:.6e}")
+    print(f"max_open_loss_delta = {summary.max_open_loss_delta:.6f}")
+    print(f"time_resolution_sensitive = {summary.time_resolution_sensitive}")
+    print(f"recommended_registry_action = {summary.recommended_registry_action}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This audit treats “time reversal” only as instrumental reversibility: "
+        "applying U(-t) after U(t) and measuring state recovery. It tests numerical reversibility "
+        "and dephasing-induced irreversibility without making claims about the fundamental nature of time."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -1707,6 +1742,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional objective-mode comparison YAML path; accepted after the subcommand for operator convenience",
     )
+    reversibility_audit_parser = subparsers.add_parser(
+        "reversibility-audit",
+        help="Audit instrumental reversibility for transition-motor operating modes",
+    )
+    reversibility_audit_parser.add_argument(
+        "--config",
+        dest="reversibility_audit_config",
+        default=None,
+        help="Optional reversibility-audit YAML path; accepted after the subcommand for operator convenience",
+    )
     time_resolution_audit_parser = subparsers.add_parser(
         "time-resolution-audit",
         help="Audit objective-mode comparison sensitivity to Hamiltonian time-grid resolution",
@@ -1750,6 +1795,7 @@ def main() -> int:
         or getattr(args, "transition_motor_pareto_config", None)
         or getattr(args, "transition_motor_pareto_audit_config", None)
         or getattr(args, "objective_mode_comparison_config", None)
+        or getattr(args, "reversibility_audit_config", None)
         or getattr(args, "time_resolution_audit_config", None)
         or getattr(args, "wafer_ensemble_config", None)
         or args.config
@@ -1800,6 +1846,8 @@ def main() -> int:
         return run_transition_motor_pareto_audit_mode(config_path)
     if args.command == "objective-mode-comparison":
         return run_objective_mode_comparison_mode(config)
+    if args.command == "reversibility-audit":
+        return run_reversibility_audit_mode(config)
     if args.command == "time-resolution-audit":
         return run_time_resolution_audit_mode(config)
     if args.command == "wafer-ensemble":

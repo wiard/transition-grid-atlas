@@ -1,0 +1,24 @@
+reversibility_audit:
+  operating_modes:
+    - name: raw
+      config: configs/hardware/transition_motor_demo.yaml
+
+    - name: normalized_noise
+      config: configs/hardware/transition_motor_normalized_demo.yaml
+
+  forward_time_selection: peak_target
+  time_step_multipliers: [0.5, 1.0, 2.0]
+
+  dephasing_strengths: [0.0, 0.01, 0.05]
+
+  thresholds:
+    coherent_fidelity_min: 0.999999
+    coherent_l2_error_max: 1.0e-6
+    open_fidelity_warning: 0.99
+    loss_delta_warning: 0.01
+    time_resolution_relative_change: 0.05
+
+  outputs:
+    csv_path: outputs/reversibility_audit.csv
+    summary_path: outputs/reversibility_audit_summary.json
+    plot_path: results/renders/reversibility_audit.png
