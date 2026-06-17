@@ -16,10 +16,23 @@ atlas/results/*.npz
 atlas/plots/*.png
 atlas/reports/*.md
 outputs/*.csv
+outputs/*.json
 outputs/*.png
+configs/generated/
+results/*.csv
+results/*.json
+results/*.npy
+results/*.npz
+results/trajectories/*.npz
+results/renders/*.gif
+results/renders/*.mp4
+/renders/
 
 # Keep output directories in git
 !atlas/results/.gitkeep
 !atlas/plots/.gitkeep
 !atlas/reports/.gitkeep
 !outputs/.gitkeep
+!results/.gitkeep
+!results/trajectories/.gitkeep
+!results/renders/.gitkeep

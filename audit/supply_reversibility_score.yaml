@@ -1,0 +1,63 @@
+reversibility_score:
+  name: R_Supply
+  range: 0.0_to_1.0
+  interpretation:
+    1.0: near_clean_inventory_transition
+    0.0: irreversible_inventory_noise
+  formula:
+    R_supply: W_service * W_cost_balance * W_recovery * W_capacity * W_stability * W_emergency
+  components:
+    W_service:
+      metrics:
+        - fill_rate
+        - stockout_rate
+        - service_level_target_error
+      clean: target_service_level_met_with_low_variance
+      reject: service_level_met_only_through_overstock
+    W_cost_balance:
+      metrics:
+        - carrying_cost
+        - stockout_cost
+        - cost_balance_residue
+      clean: carrying_cost_and_stockout_cost_within_tolerance
+      reject: one_cost_suppressed_by_exploding_the_other
+    W_recovery:
+      metrics:
+        - recovery_time_after_demand_spike
+        - review_periods_to_target_band
+      clean: returns_to_target_band_within_boundary
+      reject: prolonged_drift_after_spike
+    W_capacity:
+      metrics:
+        - capacity_utilization
+        - capacity_violation_count
+      clean: no_capacity_violations
+      reject: warehouse_capacity_exceeded
+    W_stability:
+      metrics:
+        - theta_drift
+        - forecast_error_variance
+        - lead_time_variance
+      clean: low_parameter_drift
+      reject: frequent_manual_recalibration
+    W_emergency:
+      metrics:
+        - emergency_order_rate
+        - expedite_cost
+      clean: emergency_orders_exceptional
+      reject: recovery_depends_on_expedites
+
+accept_transition_if:
+  - R_supply >= 0.86
+  - service_level_target_met == true
+  - capacity_violation_count == 0
+  - recovery_time_after_spike <= configured_review_period_boundary
+  - emergency_order_rate <= configured_exception_rate
+  - cost_balance_residue <= configured_tolerance
+
+reject_transition_if:
+  - service_level_met_by_structural_overstock
+  - stockout_reduction_requires_unbounded_carrying_cost
+  - recovery_requires_emergency_replenishment
+  - capacity_boundary_is_crossed
+  - theta_changes_without_registry_trace

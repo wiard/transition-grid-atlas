@@ -1,0 +1,99 @@
+transition_motor:
+  grid:
+    n_sites: 12
+    edges:
+      - [0, 1]
+      - [1, 2]
+      - [2, 3]
+      - [3, 4]
+      - [4, 5]
+      - [5, 6]
+      - [6, 7]
+      - [7, 8]
+      - [8, 9]
+      - [9, 10]
+      - [10, 11]
+    base_coupling: 1.0
+    input_index: 0
+    target_indices: [10, 11]
+
+  knobs:
+    - name: path_coupling_boost
+      family: coherent_coupling
+      symbol: a_path
+      basis_name: target_corridor
+      min_value: -0.15
+      max_value: 0.15
+      default: 0.0
+      units: relative_edge_scale
+      description: Boost or suppress existing edges along the inferred transport corridor.
+      hardware_meaning: Effective coupling control on existing waveguide transitions.
+
+    - name: global_coupling_scale
+      family: coherent_coupling
+      symbol: a_0
+      basis_name: uniform_edges
+      min_value: -0.10
+      max_value: 0.10
+      default: 0.0
+      units: relative_edge_scale
+      description: Uniformly scale all existing couplings.
+      hardware_meaning: Global effective coupling calibration.
+
+    - name: onsite_phase_gradient
+      family: onsite_phase
+      symbol: b_grad
+      basis_name: linear_gradient
+      min_value: -0.10
+      max_value: 0.10
+      default: 0.0
+      units: normalized_beta_shift
+      description: Apply a propagation-constant gradient across the grid.
+      hardware_meaning: Effective phase/detuning gradient.
+
+    - name: target_detuning
+      family: onsite_phase
+      symbol: b_T
+      basis_name: target_window
+      min_value: -0.10
+      max_value: 0.10
+      default: 0.0
+      units: normalized_beta_shift
+      description: Tune onsite shifts near target modes.
+      hardware_meaning: Local target-region detuning.
+
+    - name: boundary_detuning
+      family: onsite_phase
+      symbol: b_edge
+      basis_name: boundary_suppression
+      min_value: -0.10
+      max_value: 0.10
+      default: 0.0
+      units: normalized_beta_shift
+      description: Penalize or detune boundary regions.
+      hardware_meaning: Boundary leakage management.
+
+  noise:
+    profiles:
+      - [0.0, 0.1, 0.2, 0.5, 1.0, 1.0, 0.5, 0.2, 0.1, 0.0, 0.0, 0.0]
+      - [0.0, 0.0, 0.1, 0.3, 0.8, 1.0, 0.8, 0.3, 0.1, 0.0, 0.0, 0.0]
+
+  objective_weights:
+    transport: 1.0
+    noise_action: 0.5
+    leakage: 0.25
+    control_cost: 0.01
+
+  optimizer:
+    time_min: 0.0
+    time_max: 20.0
+    n_time_samples: 100
+    n_transport_modes: 2
+    finite_diff_eps: 0.0001
+    optimizer_steps: 30
+    optimizer_step_size: 0.05
+    random_restarts: 4
+    seed: 42
+
+  outputs:
+    sensitivity_csv_path: outputs/transition_motor_sensitivity.csv

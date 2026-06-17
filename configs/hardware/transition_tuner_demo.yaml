@@ -1,0 +1,35 @@
+transition_tuner:
+  grid:
+    n_sites: 12
+    edges:
+      - [0, 1]
+      - [1, 2]
+      - [2, 3]
+      - [3, 4]
+      - [4, 5]
+      - [5, 6]
+      - [6, 7]
+      - [7, 8]
+      - [8, 9]
+      - [9, 10]
+      - [10, 11]
+    base_coupling: 1.0
+    input_index: 0
+    target_indices: [10, 11]
+
+  noise:
+    profiles:
+      - [0.0, 0.1, 0.2, 0.5, 1.0, 1.0, 0.5, 0.2, 0.1, 0.0, 0.0, 0.0]
+      - [0.0, 0.0, 0.1, 0.3, 0.8, 1.0, 0.8, 0.3, 0.1, 0.0, 0.0, 0.0]
+
+  search:
+    max_relative_coupling_delta: 0.15
+    max_onsite_shift: 0.10
+    n_candidates: 250
+    seed: 42
+    time_min: 0.0
+    time_max: 20.0
+    n_time_samples: 100
+    transport_weight: 1.0
+    suppression_weight: 0.5
+    control_penalty_weight: 0.01

@@ -164,6 +164,12 @@ Transition Grid Atlas can help investigate whether a chosen model displays
 ballistic, diffusive-like, or localized transport signatures over a fitted
 window.
 
+The repository also contains an Experimental Quantum & RTT Lab that stores
+full probability trajectories as binary artifacts and renders them through a
+separate IO-only animation module. Those lab artifacts live in `results/`,
+especially `results/trajectories/` and `results/renders/`, not in the compact
+atlas CSV ledger.
+
 It does **not** prove:
 
 - a new law of physics
@@ -219,4 +225,6 @@ python run.py single
 python run.py montecarlo --runs 10
 python run.py sweep
 python run.py hunter
+python run.py lab --mode qm_free
+python run.py animate --trajectory results/trajectories/run_<run_id>.npz --out results/renders/<run_id>.gif
 ```

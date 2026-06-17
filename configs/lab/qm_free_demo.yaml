@@ -1,0 +1,23 @@
+meta:
+  name: "Pure Quantum Free Particle - Pedagogical Demo"
+  description: "Optimized boundaries to demonstrate perfect ballistic transport without edge hits."
+  version: "2.1"
+
+system:
+  L: 200
+  mode: "qm_free"
+  disorder_strength: 0.0
+
+wavepacket:
+  x0: 100
+  sigma0: 4.0
+  k0: 0.5
+
+solver:
+  T: 60.0
+  dt: 0.05
+  method: "RK4"
+
+audit:
+  edge_margin: 15
+  fit_window_late: [0.6, 0.9]

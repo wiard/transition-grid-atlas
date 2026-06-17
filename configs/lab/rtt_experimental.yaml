@@ -1,0 +1,7 @@
+lab:
+  theory_mode: rtt
+  experimental: true
+  topology_policy: null
+  audit_feedback: logged_only
+  render:
+    animate: false

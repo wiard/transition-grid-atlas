@@ -1,0 +1,48 @@
+{
+  "residue_id": "KTA-BMW-TPT-VVT-001",
+  "engine_grid": "BMW TwinPower Turbo / Valvetronic",
+  "residue_class": "combustion_phase_coherence",
+  "hardware_policy": "fixed_grid_invariant",
+  "physical_modifications": "forbidden",
+  "post_correction": "forbidden",
+  "primary_target": "minimum_entropy_combustion_transition",
+  "control_surface": {
+    "spark_timing": "phase_anchor",
+    "injection_pressure": "mixture_wave_sharpener",
+    "SOI": "preparation_phase",
+    "injection_split": "equivalence_smoothing",
+    "intake_VANOS": "charge_phase_gate",
+    "exhaust_VANOS": "residual_entropy_gate",
+    "Valvetronic_lift": "pumping_loss_suppression",
+    "boost_setpoint": "density_potential",
+    "lambda": "chemical_phase_density"
+  },
+  "audit_metrics": {
+    "CA50": "phase_center",
+    "CA10_90": "burn_duration",
+    "sigma_CA50": "phase_noise",
+    "COV_IMEP": "work_output_noise",
+    "theta_pmax": "pressure_phase",
+    "PRR_max": "mechanical_noise_boundary",
+    "knock_margin": "robustness_boundary",
+    "exergy_loss": "irreversibility_proxy"
+  },
+  "clean_residue_definition": {
+    "burn": "short_without_pressure_noise",
+    "phase": "CA50_locked_to_engine_specific_MBT_exergy_window",
+    "mixture": "homogeneous_enough_for_repeatable_kernel_growth",
+    "air_path": "Valvetronic_first_boost_second",
+    "residuals": "thermally_useful_but_not_cycle_noisy",
+    "outcome": "higher_indicated_efficiency_with_lower_variance"
+  },
+  "rejection_signature": [
+    "shorter_CA10_90_with_higher_COV_IMEP",
+    "earlier_pmax_with_knock_or_high_PRR",
+    "boost_compensation_for_bad_combustion_phase",
+    "fuel_enrichment_to_hide_instability",
+    "late_heat_release_tail",
+    "increased_coolant_or_exhaust_entropy_residue"
+  ],
+  "registry_status": "provisionally_clean",
+  "next_atlas_action": "calibrate_CA50_target_surface_by_load_speed_lambda_temperature"
+}

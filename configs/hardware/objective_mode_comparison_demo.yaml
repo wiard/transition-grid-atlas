@@ -1,0 +1,29 @@
+objective_mode_comparison:
+  base_raw_config: configs/hardware/transition_motor_demo.yaml
+  base_normalized_config: configs/hardware/transition_motor_normalized_demo.yaml
+
+  ensemble:
+    # Local demo size kept at 25 samples so paired comparison plus scale sensitivity
+    # remains fast enough on a developer machine.
+    n_samples: 25
+    onsite_sigma: 0.08
+    fabrication_correlation_length_sites: 2.0
+    fabrication_seed: 123
+    n_noise_profiles_per_sample: 3
+    phase_noise_sigma: 1.0
+    phase_noise_correlation_length_sites: 2.0
+    phase_noise_seed: 456
+
+  bootstrap:
+    n_bootstrap: 5000
+    ci: 0.95
+    seed: 123
+
+  calibration_sensitivity:
+    enabled: true
+    scale_multipliers: [0.5, 1.0, 2.0]
+
+  outputs:
+    csv_path: outputs/objective_mode_comparison.csv
+    summary_path: outputs/objective_mode_comparison_summary.json
+    plot_path: results/renders/objective_mode_comparison.png

@@ -1,0 +1,64 @@
+transition_motor_pareto_audit:
+  base_config: configs/hardware/transition_motor_pareto_demo.yaml
+
+  stress_weight_sets:
+    - name: ultra_detector
+      transport: 3.0
+      noise_action: 0.0
+      leakage: 0.0
+      control_cost: 0.005
+
+    - name: ultra_noise
+      transport: 0.25
+      noise_action: 4.0
+      leakage: 1.0
+      control_cost: 0.01
+
+    - name: ultra_leakage
+      transport: 0.25
+      noise_action: 1.0
+      leakage: 4.0
+      control_cost: 0.01
+
+    - name: ultra_cost
+      transport: 1.0
+      noise_action: 0.5
+      leakage: 0.25
+      control_cost: 0.20
+
+    - name: balanced_normalized
+      transport: 1.0
+      noise_action: 1.0
+      leakage: 1.0
+      control_cost: 1.0
+
+    - name: normalized_noise_strong
+      mode: normalized
+      transport: 1.0
+      noise_action: 3.0
+      leakage: 1.0
+      control_cost: 0.05
+      normalization:
+        transport_scale: 0.05
+        noise_action_scale: 0.002
+        leakage_scale: 0.001
+        control_cost_scale: 0.04
+
+  bootstrap:
+    n_bootstrap: 3000
+    ci: 0.95
+    seed: 123
+
+  regime_distance:
+    metrics:
+      - mean_detector_success_gain
+      - mean_noise_action_reduction
+      - mean_noise_leakage_reduction
+      - success_rate
+      - mean_best_control_cost
+      - mean_saturated_knobs
+
+  outputs:
+    csv_path: outputs/transition_motor_pareto_audit.csv
+    summary_path: outputs/transition_motor_pareto_audit_summary.json
+    plot_path: results/renders/transition_motor_pareto_audit.png

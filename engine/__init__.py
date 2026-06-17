@@ -15,7 +15,10 @@ import numpy as np
 
 from engine.evolution import simulate_dynamics
 from engine.hamiltonian import build_initial_state, build_tight_binding_hamiltonian
+from engine.lab import LAB_RESULTS_FIELDS, LabConfig, parse_lab_config, run_lab_simulation
+from engine.lab_modes import build_lab_config, normalize_theory_mode
 from engine.observables import classify_transport_regime, compute_transport_metrics
+from engine.wavepacket import gaussian_wavepacket, make_gaussian_packet
 from validation.hermitian import hermitian_error
 from validation.unitarity import unitarity_error
 
@@ -114,3 +117,16 @@ def run_transport_simulation(
         "step_hamiltonians": evolution["step_hamiltonians"],
     }
     return result
+
+
+__all__ = [
+    "LAB_RESULTS_FIELDS",
+    "LabConfig",
+    "build_lab_config",
+    "gaussian_wavepacket",
+    "make_gaussian_packet",
+    "normalize_theory_mode",
+    "parse_lab_config",
+    "run_lab_simulation",
+    "run_transport_simulation",
+]

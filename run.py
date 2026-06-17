@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import asdict
 from datetime import datetime, UTC
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +28,95 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from engine import run_transport_simulation
+from engine import LAB_RESULTS_FIELDS, run_transport_simulation
+from engine.lab_modes import build_lab_config, run_lab_simulation
 from explorer.parameter_sweep import detect_phase_boundary_zones, run_parameter_sweep
 from explorer.phase_map import build_phase_matrix, save_phase_map_plot
 from explorer.recursive_hunter import run_recursive_hunter
+from hardware.constraints import (
+    validate_coupling_range,
+    validate_disorder_range,
+    validate_gamma_range,
+    validate_wafer_config,
+)
+from hardware.ensemble_statistics import (
+    compute_bootstrap_summary,
+    compute_bound_pressure_summary,
+    compute_tradeoff_summary,
+    compute_win_rates,
+    plot_ensemble_statistics,
+    read_ensemble_csv,
+    write_statistics_json,
+)
+from hardware.lab_config_writer import write_lab_config_from_hardware_mapping
+from hardware.motor_audit import run_transition_motor_bound_audit
+from hardware.motor_ensemble import run_transition_motor_ensemble_study
+from hardware.objective_mode_comparison import (
+    bootstrap_delta_ci,
+    execute_objective_mode_comparison,
+    plot_objective_mode_comparison,
+    run_scale_sensitivity,
+    write_comparison_csv,
+    write_comparison_summary_json,
+)
+from hardware.objective_modes import ObjectiveNormalizationScale, default_objective_modes
+from hardware.objectives import evaluate_motor_metrics
+from hardware.motor_pareto import (
+    plot_pareto_results,
+    run_pareto_weight_sweep,
+    transition_motor_pareto_from_dict,
+    write_pareto_csv,
+    write_pareto_summary_json,
+)
+from hardware.motor_pareto_audit import (
+    run_pareto_audit,
+    write_pareto_audit_csv,
+    write_pareto_audit_summary_json,
+    plot_pareto_audit,
+)
+from hardware.noise_controller import effective_gamma_from_controller, noise_controller_from_dict
+from hardware.photonic_wafer import (
+    disorder_strength_from_fabrication,
+    photonic_wafer_from_dict,
+)
+from hardware.transition_tuner import (
+    build_base_hamiltonian,
+    fixed_grid_from_dict,
+    noise_operators_from_profiles,
+    random_transition_search,
+    transition_tuner_config_from_dict,
+)
+from hardware.transition_motor import (
+    build_default_motor_basis,
+    build_control_hamiltonian,
+    random_restart_transition_motor_search,
+    transition_motor_config_from_dict,
+)
+from hardware.time_resolution_audit import (
+    plot_time_resolution_audit,
+    run_time_resolution_audit,
+    write_time_resolution_csv,
+    write_time_resolution_summary_json,
+)
+from hardware.reversibility_audit import (
+    plot_reversibility_audit,
+    run_reversibility_audit,
+    write_reversibility_csv,
+    write_reversibility_summary_json,
+)
+from hardware.reversibility_ensemble import (
+    plot_reversibility_ensemble,
+    run_reversibility_ensemble,
+    summarize_reversibility_ensemble,
+    write_reversibility_ensemble_csv,
+    write_reversibility_ensemble_summary_json,
+)
+from hardware.sensitivity import compute_sensitivity_matrix, write_sensitivity_csv
+from hardware.wafer_ensemble import run_wafer_ensemble_study
+from interface.visualiser import render_probability_animation
 from inverse_transition_layer import run_inverse_transition_analysis
 from validation.audit import build_audit_report
+from validation.kta_audit import summarize_kta_audit
 from validation.monte_carlo import summarise_samples
 
 
@@ -40,13 +125,36 @@ ATLAS_RESULTS_DIR = PROJECT_ROOT / "atlas" / "results"
 ATLAS_PLOTS_DIR = PROJECT_ROOT / "atlas" / "plots"
 ATLAS_REPORTS_DIR = PROJECT_ROOT / "atlas" / "reports"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+LAB_RESULTS_DIR = PROJECT_ROOT / "results"
+LAB_TRAJECTORIES_DIR = LAB_RESULTS_DIR / "trajectories"
+LAB_RENDERS_DIR = LAB_RESULTS_DIR / "renders"
+LAB_LEDGER_PATH = LAB_RESULTS_DIR / "master_results.csv"
+GENERATED_CONFIGS_DIR = PROJECT_ROOT / "configs" / "generated"
 MASTER_RESULTS_PATH = ATLAS_RESULTS_DIR / "master_results.csv"
 LATEST_REPORT_PATH = ATLAS_REPORTS_DIR / "latest_report.md"
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    with config_path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    base_path = PROJECT_ROOT / "config.yaml"
+    with base_path.open("r", encoding="utf-8") as handle:
+        base_config = yaml.safe_load(handle)
+
+    resolved = config_path.expanduser().resolve()
+    if resolved == base_path.resolve():
+        return base_config
+
+    with resolved.open("r", encoding="utf-8") as handle:
+        override = yaml.safe_load(handle) or {}
+    return _deep_merge(base_config, override)
 
 
 def ensure_output_dirs() -> None:
@@ -54,10 +162,53 @@ def ensure_output_dirs() -> None:
     ATLAS_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     ATLAS_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_RENDERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def timestamp_token() -> str:
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def lab_run_id(theory_mode: str) -> str:
+    return f"{timestamp_token()}_{theory_mode}"
+
+
+def append_lab_results(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ensure_output_dirs()
+    file_exists = LAB_LEDGER_PATH.exists()
+    with LAB_LEDGER_PATH.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LAB_RESULTS_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in LAB_RESULTS_FIELDS})
+
+
+def artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hardware_mapping_config_hash(config: dict[str, Any]) -> str:
+    payload = yaml.safe_dump(config, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def resolve_lab_artifact_path(run_id: str | None, artifact_path: str | None) -> Path:
+    if run_id and artifact_path:
+        raise ValueError("Use either --run-id or --artifact-path, not both")
+    if artifact_path:
+        return Path(artifact_path).expanduser().resolve()
+    if run_id:
+        return (LAB_TRAJECTORIES_DIR / f"run_{run_id}.npz").resolve()
+    raise ValueError("Either --run-id or --artifact-path is required")
 
 
 def flatten_result(result: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -374,6 +525,116 @@ def build_inverse_report_lines(analysis: dict[str, Any]) -> list[str]:
     return lines
 
 
+def build_lab_report_lines(result: dict[str, Any], render_path: Path | None = None) -> list[str]:
+    lab_cfg = result["config"]
+    lines = [
+        "## Experimental Quantum & RTT Lab summary",
+        "",
+        f"- timestamp_utc: {datetime.now(UTC).isoformat()}",
+        f"- run_id: {result['run_id']}",
+        f"- theory_mode: {lab_cfg.theory_mode}",
+        f"- grid_size: {lab_cfg.grid_size}",
+        f"- time_horizon_steps: {result['summary_row']['T']}",
+        f"- dt: {lab_cfg.dt}",
+        f"- W: {result['summary_row']['W']}",
+        f"- gamma: {result['summary_row']['gamma']}",
+        f"- eta: {lab_cfg.eta}",
+        f"- x0: {lab_cfg.x0}",
+        f"- sigma: {lab_cfg.sigma}",
+        f"- k0: {lab_cfg.k0}",
+        f"- alpha_late: {result['alpha_late']:.6f}",
+        f"- trace_error: {result['trace_error']:.6e}",
+        f"- ipr_final: {result['summary_row']['ipr_final']:.6f}",
+        f"- edge_hit: {result['edge_hit']}",
+        f"- falldown: {result['falldown']}",
+        f"- unitarity_error: {result['unitarity_error']:.6e}",
+        f"- hermitian_error: {result['hermitian_error']:.6e}",
+        f"- trajectory_artifact: {result['artifact_path']}",
+        f"- trajectory_artifact_hash: {result['artifact_hash']}",
+        f"- config_hash: {result['config_hash']}",
+    ]
+    if render_path is not None:
+        lines.append(f"- render_artifact: {render_path}")
+    return lines
+
+
+def run_lab_mode(
+    config: dict[str, Any],
+    *,
+    mode: str | None = None,
+    gamma: float | None = None,
+    render: bool = False,
+) -> int:
+    ensure_output_dirs()
+    lab_cfg = build_lab_config(config, mode_override=mode, gamma_override=gamma)
+    run_id = lab_run_id(lab_cfg.theory_mode)
+    result = run_lab_simulation(
+        config=config,
+        run_id=run_id,
+        trajectories_dir=LAB_TRAJECTORIES_DIR,
+        lab_config=lab_cfg,
+    )
+
+    audit_summary = summarize_kta_audit(
+        probability_frames=result["probability_frames"],
+        times=result["times"],
+        trace_series=result["trace_series"],
+        x0=lab_cfg.x0,
+        config=lab_cfg,
+        coherence_norm_final=result["summary_row"]["coherence_norm_final"],
+    )
+    result["trace_error"] = audit_summary["trace_error"]
+    result["alpha_late"] = audit_summary["alpha_late"]
+    result["edge_hit"] = audit_summary["edge_hit"]
+    result["falldown"] = audit_summary["falldown_candidate"]
+    result["summary_row"]["trace_error"] = audit_summary["trace_error"]
+    result["summary_row"]["ipr_final"] = audit_summary["ipr_final"]
+    result["summary_row"]["alpha_late"] = audit_summary["alpha_late"]
+    result["summary_row"]["r2_late"] = audit_summary["r2_late"]
+    result["summary_row"]["edge_hit"] = audit_summary["edge_hit"]
+    result["summary_row"]["falldown_candidate"] = audit_summary["falldown_candidate"]
+    result["summary_row"]["falldown_score"] = audit_summary["falldown_score"]
+    result["summary_row"]["frame_corr_late"] = audit_summary["frame_corr_late"]
+    result["summary_row"]["x_var_drift_late"] = audit_summary["x_var_drift_late"]
+    result["summary_row"]["coherence_norm_final"] = audit_summary["coherence_norm_final"]
+    result["summary_row"]["zeno_indicator"] = audit_summary["zeno_indicator"]
+    result["summary_row"]["artifact_hash"] = artifact_sha256(result["artifact_path"])
+    result["artifact_hash"] = result["summary_row"]["artifact_hash"]
+    append_lab_results([result["summary_row"]])
+
+    render_path = None
+    should_render = bool(render or lab_cfg.render_animate)
+    if should_render:
+        render_path = LAB_RENDERS_DIR / f"{run_id}.mp4"
+        render_probability_animation(artifact_path=result["artifact_path"], output_path=render_path, fps=lab_cfg.render_fps)
+
+    report_lines = build_lab_report_lines(result, render_path=render_path)
+    write_latest_report("Latest Transition Grid Atlas report", report_lines)
+
+    print(f"run_id: {run_id}")
+    print(f"theory_mode: {lab_cfg.theory_mode}")
+    print(f"trajectory_artifact: {result['artifact_path']}")
+    print(f"artifact_hash: {result['artifact_hash']}")
+    print(f"trace_error: {result['trace_error']:.6e}")
+    print(f"ipr_final: {result['summary_row']['ipr_final']:.6f}")
+    print(f"alpha_late: {result['alpha_late']:.6f}")
+    print(f"edge_hit: {result['edge_hit']}")
+    print(f"falldown: {result['falldown']}")
+    print(f"config_hash: {result['config_hash']}")
+    if render_path is not None:
+        print(f"render_artifact: {render_path}")
+    return 0
+
+
+def run_animate_mode(*, trajectory: str, output_path: str) -> int:
+    ensure_output_dirs()
+    artifact = Path(trajectory).expanduser().resolve()
+    output = Path(output_path).expanduser().resolve()
+    render_probability_animation(artifact_path=artifact, output_path=output, fps=30)
+    print(f"render_artifact: {output}")
+    return 0
+
+
 def run_single_mode(config: dict[str, Any]) -> int:
     result = run_transport_simulation(config=config)
     append_master_results([flatten_result(result, mode="single")])
@@ -640,6 +901,779 @@ def run_inverse_mode(config: dict[str, Any]) -> int:
     return 0
 
 
+def run_hardware_map_mode(
+    config: dict[str, Any],
+    *,
+    emit_lab_config: bool = False,
+    out_config: str | None = None,
+) -> int:
+    hardware_block = dict(config.get("hardware", {}))
+    noise_block = dict(config.get("noise_controller", {}))
+    mapping_block = dict(config.get("mapping", {}))
+    if not hardware_block:
+        raise ValueError("hardware-map requires a hardware block in the config")
+    if not noise_block:
+        raise ValueError("hardware-map requires a noise_controller block in the config")
+
+    wafer = photonic_wafer_from_dict(hardware_block)
+    controller = noise_controller_from_dict(noise_block)
+    validate_wafer_config(wafer)
+    validate_coupling_range(wafer.coupling_j)
+
+    W_eff = disorder_strength_from_fabrication(wafer)
+    gamma_eff = effective_gamma_from_controller(controller)
+    validate_disorder_range(W_eff)
+    validate_gamma_range(gamma_eff)
+
+    target_indices = [int(index) for index in mapping_block.get("target_indices", [])]
+    for index in target_indices:
+        if index < 0 or index >= wafer.n_sites:
+            raise ValueError(f"target index out of range for wafer layout: {index}")
+
+    generated_lab_config = None
+    run_command = None
+    if emit_lab_config:
+        config_hash = hardware_mapping_config_hash(
+            {
+                "hardware": hardware_block,
+                "noise_controller": noise_block,
+                "mapping": mapping_block,
+                "W_eff": round(W_eff, 12),
+                "gamma_eff": round(gamma_eff, 12),
+            }
+        )
+        output_path = (
+            Path(out_config).expanduser().resolve()
+            if out_config
+            else (GENERATED_CONFIGS_DIR / f"photonic_wafer_{config_hash}.yaml").resolve()
+        )
+        metadata = {
+            "layout": wafer.layout,
+            "n_sites": wafer.n_sites,
+            "calibration_note": str(
+                mapping_block.get(
+                    "calibration_note",
+                    "Phenomenological first-pass mapping from wafer disorder and stochastic phase modulation to KTA W and gamma.",
+                )
+            ),
+        }
+        generated_lab_config = write_lab_config_from_hardware_mapping(
+            output_path,
+            W_eff=W_eff,
+            gamma_eff=gamma_eff,
+            n_sites=wafer.n_sites,
+            target_indices=target_indices,
+            metadata=metadata,
+        )
+        run_command = f"python run.py --config {generated_lab_config} lab --mode lindblad"
+    else:
+        run_command = (
+            f"python run.py lab --mode lindblad --gamma {gamma_eff:.6f} "
+            f"# set effective W={W_eff:.6f} in a lab override config"
+        )
+
+    print("Photonic wafer mapping")
+    print(f"layout = {wafer.layout}")
+    print(f"n_sites = {wafer.n_sites}")
+    print(f"W_eff = {W_eff:.6f}")
+    print(f"gamma_eff = {gamma_eff:.6f}")
+    print(f"target_detectors = {target_indices}")
+    if generated_lab_config is not None:
+        print(f"generated_lab_config = {generated_lab_config}")
+    print(f"recommended_kta_command = {run_command}")
+    print(f"run_command = {run_command}")
+    return 0
+
+
+def run_transition_tune_mode(config: dict[str, Any]) -> int:
+    tuner_block = dict(config.get("transition_tuner", {}))
+    if not tuner_block:
+        raise ValueError("transition-tune requires a transition_tuner block in the config")
+
+    grid = fixed_grid_from_dict(dict(tuner_block.get("grid", {})))
+    noise_block = dict(tuner_block.get("noise", {}))
+    search_block = dict(tuner_block.get("search", {}))
+    if not noise_block.get("profiles"):
+        raise ValueError("transition-tune requires noise profiles in transition_tuner.noise.profiles")
+
+    noise_ops = noise_operators_from_profiles(list(noise_block["profiles"]))
+    tuner_config = transition_tuner_config_from_dict(search_block)
+    result = random_transition_search(grid, noise_ops, tuner_config)
+    improvement = result.best_objective - result.baseline_objective
+
+    print("Transition dynamics tuner")
+    print("subspace_definition = dynamic_transport_modes_from_H")
+    print("noise_overlap_control_dependent = true")
+    print(f"fixed_grid_sites = {grid.n_sites}")
+    print(f"fixed_grid_edges = {len(grid.edges)}")
+    print(f"baseline_transport_efficiency = {result.baseline_transport_efficiency:.6f}")
+    print(f"best_transport_efficiency = {result.best_transport_efficiency:.6f}")
+    print(f"baseline_noise_overlap = {result.baseline_noise_overlap:.6f}")
+    print(f"best_noise_overlap = {result.best_noise_overlap:.6f}")
+    print(f"baseline_suppression_score = {result.baseline_suppression_score:.6f}")
+    print(f"best_suppression_score = {result.best_suppression_score:.6f}")
+    print(f"baseline_objective = {result.baseline_objective:.6f}")
+    print(f"best_objective = {result.best_objective:.6f}")
+    print(f"improvement = {improvement:.6f}")
+    print(
+        "interpretation = This is an algebraic first-pass tuner for hardware-native error suppression. "
+        "It does not implement full QEC, syndrome extraction or recovery. "
+        "It searches transition parameters on a fixed grid that reduce phase-noise overlap "
+        "with information-carrying modes."
+    )
+    return 0
+
+
+def run_wafer_ensemble_mode(config: dict[str, Any]) -> int:
+    _, summary, csv_path, summary_path = run_wafer_ensemble_study(config)
+    print("Synthetic wafer ensemble study")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"success_rate = {summary.success_rate:.6f}")
+    print(f"mean_transport_gain = {summary.mean_transport_gain:.6f}")
+    print(f"mean_noise_overlap_reduction = {summary.mean_noise_overlap_reduction:.6f}")
+    print(f"mean_objective_gain = {summary.mean_objective_gain:.6f}")
+    print(f"mean_baseline_transport_efficiency = {summary.mean_baseline_transport_efficiency:.6f}")
+    print(f"mean_best_transport_efficiency = {summary.mean_best_transport_efficiency:.6f}")
+    print(f"mean_baseline_noise_overlap = {summary.mean_baseline_noise_overlap:.6f}")
+    print(f"mean_best_noise_overlap = {summary.mean_best_noise_overlap:.6f}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether transition-dynamics tuning remains beneficial "
+        "under sampled fabrication disorder and phase-noise profiles. It is a hardware-native "
+        "error-suppression study, not full QEC."
+    )
+    return 0
+
+
+def run_transition_motor_mode(
+    config: dict[str, Any],
+    *,
+    report_sensitivity: bool = False,
+    operating_mode: str | None = None,
+) -> int:
+    if operating_mode:
+        config = dict(config)
+        block = dict(config["transition_motor"])
+        if "objective" in block:
+            objective_block = dict(block.get("objective", {}))
+            objective_block["selected_mode"] = operating_mode
+            block["objective"] = objective_block
+        elif "objective_mode" in block:
+            objective_mode_block = dict(block["objective_mode"])
+            base_scales: ObjectiveNormalizationScale | None = None
+            if "normalization" in objective_mode_block:
+                norm = dict(objective_mode_block["normalization"])
+                base_scales = ObjectiveNormalizationScale(
+                    transport_scale=float(norm["transport_scale"]),
+                    noise_action_scale=float(norm["noise_action_scale"]),
+                    leakage_scale=float(norm["leakage_scale"]),
+                    control_cost_scale=float(norm["control_cost_scale"]),
+                )
+            candidates = {mode.name: mode for mode in default_objective_modes(base_scales)}
+            if operating_mode not in candidates:
+                raise ValueError(f"unknown objective mode override: {operating_mode}")
+            selected = candidates[operating_mode]
+            objective_mode_block = {
+                "name": selected.name,
+                "mode": selected.mode,
+                "weights": selected.weights_dict(),
+                "description": selected.description,
+            }
+            if selected.normalization is not None:
+                objective_mode_block["normalization"] = {
+                    "transport_scale": selected.normalization.transport_scale,
+                    "noise_action_scale": selected.normalization.noise_action_scale,
+                    "leakage_scale": selected.normalization.leakage_scale,
+                    "control_cost_scale": selected.normalization.control_cost_scale,
+                }
+            block["objective_mode"] = objective_mode_block
+        config["transition_motor"] = block
+    motor_config, outputs = transition_motor_config_from_dict(config)
+    grid = motor_config.grid
+    registry = motor_config.knob_registry
+    basis = build_default_motor_basis(grid)
+    H0 = build_base_hamiltonian(grid)
+    result = random_restart_transition_motor_search(
+        H0,
+        grid,
+        motor_config.noise_profiles,
+        basis,
+        registry,
+        motor_config,
+    )
+
+    sensitivity_path = None
+    if report_sensitivity or outputs.get("sensitivity_csv_path"):
+        times = np.linspace(motor_config.time_min, motor_config.time_max, motor_config.n_time_samples, dtype=np.float64)
+
+        def metrics_fn(theta: dict[str, float]):
+            H = build_control_hamiltonian(H0, grid, theta, basis, registry)
+
+            return evaluate_motor_metrics(
+                H,
+                motor_config.noise_profiles,
+                grid,
+                theta,
+                times,
+                motor_config.objective_weights,
+                objective_mode=motor_config.objective_mode,
+                n_modes=motor_config.n_transport_modes,
+            )
+
+        entries = compute_sensitivity_matrix(
+            metrics_fn,
+            result.best_theta,
+            registry,
+            eps=motor_config.finite_diff_eps,
+            metric_names=[
+                "transport_efficiency",
+                "noise_action_on_info",
+                "noise_leakage",
+                "control_cost",
+                "objective",
+            ],
+        )
+        sensitivity_path = write_sensitivity_csv(
+            outputs.get("sensitivity_csv_path", OUTPUTS_DIR / "transition_motor_sensitivity.csv"),
+            entries,
+        )
+
+    print("Transition Motor Instrumentation")
+    print(f"fixed_grid_sites = {grid.n_sites}")
+    print(f"fixed_grid_edges = {len(grid.edges)}")
+    print(f"active_knobs = {registry.names()}")
+    mode_name = motor_config.objective_mode.name if motor_config.objective_mode is not None else "legacy_objective_weights"
+    mode_type = motor_config.objective_mode.mode if motor_config.objective_mode is not None else "raw"
+    print(f"objective_mode = {mode_name}")
+    print(f"objective_mode_type = {mode_type}")
+    if motor_config.objective_mode is not None:
+        print(
+            "selected_objective_mode_description = "
+            f"{motor_config.objective_mode.description}"
+        )
+    print(
+        "available_objective_modes = "
+        f"{motor_config.objective_mode_registry.names() if motor_config.objective_mode_registry is not None else ['legacy_objective_weights']}"
+    )
+    print(f"objective_weights = {motor_config.objective_weights}")
+    if motor_config.objective_mode is not None and motor_config.objective_mode.normalization is not None:
+        print(
+            "objective_normalization = "
+            f"{{'transport_scale': {motor_config.objective_mode.normalization.transport_scale:.6f}, "
+            f"'noise_action_scale': {motor_config.objective_mode.normalization.noise_action_scale:.6f}, "
+            f"'leakage_scale': {motor_config.objective_mode.normalization.leakage_scale:.6f}, "
+            f"'control_cost_scale': {motor_config.objective_mode.normalization.control_cost_scale:.6f}}}"
+        )
+        print(
+            "normalization_scales = "
+            f"{{'transport_scale': {motor_config.objective_mode.normalization.transport_scale:.6f}, "
+            f"'noise_action_scale': {motor_config.objective_mode.normalization.noise_action_scale:.6f}, "
+            f"'leakage_scale': {motor_config.objective_mode.normalization.leakage_scale:.6f}, "
+            f"'control_cost_scale': {motor_config.objective_mode.normalization.control_cost_scale:.6f}}}"
+        )
+    else:
+        print("objective_normalization = none")
+    print(f"baseline_transport_efficiency = {result.baseline_metrics.transport_efficiency:.6f}")
+    print(f"best_transport_efficiency = {result.best_metrics.transport_efficiency:.6f}")
+    print(f"baseline_noise_action_on_info = {result.baseline_metrics.noise_action_on_info:.6f}")
+    print(f"best_noise_action_on_info = {result.best_metrics.noise_action_on_info:.6f}")
+    print(f"baseline_noise_leakage = {result.baseline_metrics.noise_leakage:.6f}")
+    print(f"best_noise_leakage = {result.best_metrics.noise_leakage:.6f}")
+    print(f"baseline_control_cost = {result.baseline_metrics.control_cost:.6f}")
+    print(f"best_control_cost = {result.best_metrics.control_cost:.6f}")
+    print(f"baseline_objective = {result.baseline_metrics.objective:.6f}")
+    print(f"best_objective = {result.best_metrics.objective:.6f}")
+    print(f"objective_improvement = {result.objective_improvement:.6f}")
+    print(f"best_theta = {result.best_theta}")
+    print(f"top_sensitivities = {result.top_sensitivities}")
+    print(f"sensitivity_csv_path = {sensitivity_path if sensitivity_path is not None else 'not_written'}")
+    print(
+        "interpretation = The transition motor does not change the physical grid. "
+        "It exposes interpretable knobs on the effective Hamiltonian and measures "
+        "how each knob affects transport, noise-action on information modes, leakage "
+        "and control cost. This is hardware-native error suppression, not full QEC."
+    )
+    return 0
+
+
+def run_transition_motor_audit_mode(config: dict[str, Any]) -> int:
+    motor_config, _ = transition_motor_config_from_dict(config)
+    audit = run_transition_motor_bound_audit(motor_config)
+
+    statuses = audit.bound_statuses
+    ablations = sorted(audit.ablations, key=lambda item: item.objective_loss_from_ablation, reverse=True)
+    efficiencies = sorted(audit.efficiencies, key=lambda item: item.gain_per_cost, reverse=True)
+    upper = [item.name for item in statuses if item.at_upper_bound]
+    lower = [item.name for item in statuses if item.at_lower_bound]
+    near = [item.name for item in statuses if item.near_bound]
+
+    print("Transition Motor Bound-Pressure Audit")
+    print(f"saturated_knobs = {sum(1 for item in statuses if item.at_lower_bound or item.at_upper_bound)}")
+    print(f"near_bound_knobs = {near}")
+    print(f"knobs_at_upper_bound = {upper}")
+    print(f"knobs_at_lower_bound = {lower}")
+    print(
+        "top_knobs_by_objective_loss = "
+        f"{[{'knob': item.knob, 'objective_loss_from_ablation': item.objective_loss_from_ablation} for item in ablations[:3]]}"
+    )
+    print(
+        "top_knobs_by_gain_per_cost = "
+        f"{[{'knob': item.knob, 'gain_per_cost': item.gain_per_cost} for item in efficiencies[:3]]}"
+    )
+    for item in audit.limit_sweep:
+        print(f"limit_scale_{item.scale:.2f}_objective_improvement = {item.objective_improvement:.6f}")
+    print(f"mean_best_objective = {audit.seed_summary['mean_best_objective']:.6f}")
+    print(f"std_best_objective = {audit.seed_summary['std_best_objective']:.6f}")
+    print(f"min_best_objective = {audit.seed_summary['min_best_objective']:.6f}")
+    print(f"max_best_objective = {audit.seed_summary['max_best_objective']:.6f}")
+    print(f"constraint_limited = {str(audit.constraint_limited).lower()}")
+    print(f"recommended_action = {audit.recommended_action}")
+    return 0
+
+
+def run_transition_motor_ensemble_mode(config: dict[str, Any]) -> int:
+    _, summary, csv_path, summary_path = run_transition_motor_ensemble_study(config)
+    print("Transition Motor Ensemble Study")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"success_rate = {summary.success_rate:.6f}")
+    print(f"mean_detector_success_gain = {summary.mean_detector_success_gain:.6f}")
+    print(f"median_detector_success_gain = {summary.median_detector_success_gain:.6f}")
+    print(f"mean_transport_gain = {summary.mean_transport_gain:.6f}")
+    print(f"mean_noise_action_reduction = {summary.mean_noise_action_reduction:.6f}")
+    print(f"mean_noise_leakage_reduction = {summary.mean_noise_leakage_reduction:.6f}")
+    print(f"mean_objective_gain = {summary.mean_objective_gain:.6f}")
+    print(f"mean_saturated_knobs = {summary.mean_saturated_knobs:.6f}")
+    print(f"mean_near_bound_knobs = {summary.mean_near_bound_knobs:.6f}")
+    print(f"mean_baseline_detector_success = {summary.mean_baseline_detector_success:.6f}")
+    print(f"mean_best_detector_success = {summary.mean_best_detector_success:.6f}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether transition-motor controls improve "
+        "detector-output success and reduce noise-action under sampled wafer disorder and phase-noise "
+        "profiles. It is hardware-native error suppression, not full QEC or experimental validation."
+    )
+    return 0
+
+
+def run_transition_motor_ensemble_stats_mode(
+    *,
+    csv_path: str,
+    out_json: str,
+    out_plot: str,
+) -> int:
+    rows = read_ensemble_csv(csv_path)
+    win_rates = compute_win_rates(rows)
+    bootstrap = compute_bootstrap_summary(
+        rows,
+        [
+            "detector_success_gain",
+            "noise_action_reduction",
+            "noise_leakage_reduction",
+            "objective_gain",
+        ],
+    )
+    bound_pressure = compute_bound_pressure_summary(rows)
+    tradeoffs = compute_tradeoff_summary(rows)
+    json_path = write_statistics_json(
+        out_json,
+        win_rates=win_rates,
+        bootstrap=bootstrap,
+        bound_pressure=bound_pressure,
+        tradeoffs=tradeoffs,
+    )
+    plot_path = plot_ensemble_statistics(rows, out_plot)
+
+    bootstrap_by_metric = {item.metric: item for item in bootstrap}
+    detector_boot = bootstrap_by_metric["detector_success_gain"]
+    noise_boot = bootstrap_by_metric["noise_action_reduction"]
+    leakage_boot = bootstrap_by_metric["noise_leakage_reduction"]
+
+    print("Transition Motor Ensemble Statistics")
+    print(f"n_samples = {win_rates.n_samples}")
+    print(f"detector_win_rate = {win_rates.detector_win_rate:.6f}")
+    print(f"noise_action_win_rate = {win_rates.noise_action_win_rate:.6f}")
+    print(f"leakage_win_rate = {win_rates.leakage_win_rate:.6f}")
+    print(f"objective_win_rate = {win_rates.objective_win_rate:.6f}")
+    print(f"detector_and_noise_win_rate = {win_rates.detector_and_noise_win_rate:.6f}")
+    print(f"all_core_metrics_win_rate = {win_rates.all_core_metrics_win_rate:.6f}")
+    print(f"bootstrap_detector_gain_mean = {detector_boot.mean:.6f}")
+    print(f"bootstrap_detector_gain_95ci = ({detector_boot.ci_low:.6f}, {detector_boot.ci_high:.6f})")
+    print(f"bootstrap_noise_action_reduction_mean = {noise_boot.mean:.6f}")
+    print(f"bootstrap_noise_action_reduction_95ci = ({noise_boot.ci_low:.6f}, {noise_boot.ci_high:.6f})")
+    print(f"bootstrap_leakage_reduction_mean = {leakage_boot.mean:.6f}")
+    print(f"bootstrap_leakage_reduction_95ci = ({leakage_boot.ci_low:.6f}, {leakage_boot.ci_high:.6f})")
+    print(f"mean_saturated_knobs = {bound_pressure.mean_saturated_knobs:.6f}")
+    print(f"detector_vs_noise_corr = {tradeoffs.detector_vs_noise_corr:.6f}")
+    print(f"stats_json_path = {json_path}")
+    print(f"stats_plot_path = {plot_path}")
+    print(
+        "interpretation = This statistical audit checks whether the synthetic ensemble improvement "
+        "is distributed across samples or dominated by outliers. It supports detector-output robustness "
+        "analysis, not experimental validation or full QEC."
+    )
+    return 0
+
+
+def run_transition_motor_pareto_mode(config: dict[str, Any]) -> int:
+    results, summary = run_pareto_weight_sweep(config)
+    parsed = transition_motor_pareto_from_dict(config)
+    csv_path = write_pareto_csv(parsed.outputs["csv_path"], results)
+    summary_path = write_pareto_summary_json(parsed.outputs["summary_path"], results, summary)
+    plot_path = plot_pareto_results(results, parsed.outputs["plot_path"])
+
+    print("Transition Motor Pareto Sweep")
+    print(f"n_weight_sets = {summary.n_weight_sets}")
+    print(f"n_samples_per_weight_set = {results[0].n_samples if results else 0}")
+    print(f"pareto_optimal_names = {summary.pareto_optimal_names}")
+    print(f"best_detector_name = {summary.best_detector_name}")
+    print(f"best_noise_action_name = {summary.best_noise_action_name}")
+    print(f"best_leakage_name = {summary.best_leakage_name}")
+    print(f"best_balanced_name = {summary.best_balanced_name}")
+    if summary.reversibility_enabled:
+        print(f"reversibility_enabled = {summary.reversibility_enabled}")
+        print(f"dephasing_strength = {summary.dephasing_strength_for_reversibility}")
+        print(f"best_reversibility_name = {summary.best_reversibility_name}")
+        print(f"lowest_open_loss_name = {summary.lowest_open_loss_name}")
+        print(f"preferred_mode_with_reversibility_tiebreak = {summary.preferred_mode_with_reversibility_tiebreak}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    for result in results:
+        print(
+            f"{result.name} = "
+            f"{{'mode': '{result.objective_mode_type}', "
+            f"'success_rate': {result.success_rate:.6f}, "
+            f"'mean_detector_success_gain': {result.mean_detector_success_gain:.6f}, "
+            f"'mean_noise_action_reduction': {result.mean_noise_action_reduction:.6f}, "
+            f"'mean_noise_leakage_reduction': {result.mean_noise_leakage_reduction:.6f}, "
+            f"'mean_best_control_cost': {result.mean_best_control_cost:.6f}, "
+            f"'mean_saturated_knobs': {result.mean_saturated_knobs:.6f}, "
+            f"'mean_reversibility_score': {result.mean_reversibility_score:.6f}, "
+            f"'mean_open_loss_delta': {result.mean_open_loss_delta:.6f}, "
+            f"'pareto_optimal': {str(result.is_pareto_optimal).lower()}}}"
+        )
+    print(
+        "interpretation = This Pareto sweep tests how objective weights shift the transition motor "
+        "between detector-output optimization, noise-action reduction, leakage control and actuator cost. "
+        "It is synthetic ensemble analysis, not experimental validation or full QEC."
+    )
+    return 0
+
+
+def run_transition_motor_pareto_audit_mode(config_path: Path) -> int:
+    audit_result = run_pareto_audit(config_path)
+    csv_path = write_pareto_audit_csv(str(audit_result.csv_path), audit_result)
+    summary_path = write_pareto_audit_summary_json(str(audit_result.summary_path), audit_result)
+    plot_path = plot_pareto_audit(audit_result, str(audit_result.plot_path))
+
+    detector_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "detector_success_gain"
+    }
+    noise_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "noise_action_reduction"
+    }
+    leakage_ci = {
+        item.preset_name: (item.ci_low, item.ci_high)
+        for item in audit_result.confidence_intervals
+        if item.metric == "noise_leakage_reduction"
+    }
+    component_lookup = {item.preset_name: item for item in audit_result.component_scales}
+    knob_lookup = {item.preset_name: item for item in audit_result.knob_profiles}
+
+    print("Transition Motor Pareto Audit")
+    print(f"n_presets = {audit_result.summary.n_presets}")
+    print(f"base_preset_names = {audit_result.summary.base_preset_names}")
+    print(f"stress_preset_names = {audit_result.summary.stress_preset_names}")
+    print(f"dominant_component_overall = {audit_result.summary.dominant_component_overall}")
+    print(f"component_scaling_issue = {str(audit_result.summary.component_scaling_issue).lower()}")
+    print(f"mean_pairwise_regime_distance = {audit_result.summary.mean_pairwise_regime_distance:.6f}")
+    print(f"closest_presets = {audit_result.summary.closest_presets}")
+    print(f"most_separated_presets = {audit_result.summary.most_separated_presets}")
+    print(f"compressed_frontier = {str(audit_result.summary.compressed_frontier).lower()}")
+    print(f"best_normalized_score_name = {audit_result.best_normalized_score_name}")
+    print(f"reversibility_enabled = {str(audit_result.summary.reversibility_enabled).lower()}")
+    print(f"dephasing_strength_for_reversibility = {audit_result.summary.dephasing_strength_for_reversibility}")
+    print(f"best_reversibility_name = {audit_result.summary.best_reversibility_name}")
+    print(f"lowest_open_loss_name = {audit_result.summary.lowest_open_loss_name}")
+    print(f"preferred_mode_with_reversibility_tiebreak = {audit_result.summary.preferred_mode_with_reversibility_tiebreak}")
+    print(f"reversibility_score_by_preset = {audit_result.reversibility_score_by_preset}")
+    print(f"open_loss_delta_by_preset = {audit_result.open_loss_delta_by_preset}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print("Component scale:")
+    for result in audit_result.pareto_results:
+        component = component_lookup[result.name]
+        print(
+            f"{result.name} = {{'mode': '{result.objective_mode_type}', "
+            f"'normalization_scales': {None if result.normalization is None else {'transport_scale': result.normalization.transport_scale, 'noise_action_scale': result.normalization.noise_action_scale, 'leakage_scale': result.normalization.leakage_scale, 'control_cost_scale': result.normalization.control_cost_scale}}, "
+            f"'dominant_component': '{component.dominant_component}', "
+            f"'detector_to_noise_ratio': {component.detector_to_noise_ratio:.6f}, "
+            f"'detector_to_leakage_ratio': {component.detector_to_leakage_ratio:.6f}}}"
+        )
+    print("Confidence intervals:")
+    print(f"detector_gain_95ci = {detector_ci}")
+    print(f"noise_action_reduction_95ci = {noise_ci}")
+    print(f"leakage_reduction_95ci = {leakage_ci}")
+    print("Knob profiles:")
+    for result in audit_result.pareto_results:
+        profile = knob_lookup[result.name]
+        dominant_knobs = sorted(profile.mean_theta, key=lambda name: abs(profile.mean_theta[name]), reverse=True)[:2]
+        bound_pressure = {
+            name: {
+                "upper": profile.fraction_at_upper_bound[name],
+                "lower": profile.fraction_at_lower_bound[name],
+            }
+            for name in dominant_knobs
+        }
+        print(
+            f"{result.name} = {{'dominant_knobs': {dominant_knobs}, "
+            f"'bound_pressure': {bound_pressure}}}"
+        )
+    print(
+        "interpretation = This audit determines whether the Pareto sweep exposes genuinely distinct "
+        "transition-motor regimes or a compressed, constraint-shaped frontier dominated by one objective "
+        "component. It is synthetic ensemble analysis, not experimental validation or full QEC."
+    )
+    return 0
+
+
+def run_reversibility_ensemble_mode(config: dict[str, Any]) -> int:
+    results, summary = run_reversibility_ensemble(config)
+    selection = dict(config["reversibility_ensemble"]["selection"])
+    outputs = dict(config["reversibility_ensemble"]["outputs"])
+    mode_summaries, _ = summarize_reversibility_ensemble(
+        results,
+        detector_tolerance_fraction=float(selection["detector_tolerance_fraction"]),
+    )
+    csv_path = write_reversibility_ensemble_csv(outputs["csv_path"], results, mode_summaries)
+    summary_path = write_reversibility_ensemble_summary_json(outputs["summary_path"], summary, mode_summaries)
+    plot_path = plot_reversibility_ensemble(mode_summaries, summary, outputs["plot_path"])
+
+    print("Reversibility Ensemble")
+    print(f"n_samples = {summary.n_samples}")
+    print(f"operating_modes = {summary.operating_modes}")
+    print(f"dephasing_strengths = {summary.dephasing_strengths}")
+    print(f"best_reversibility_by_dephasing = {summary.best_reversibility_by_dephasing}")
+    print(f"lowest_open_loss_by_dephasing = {summary.lowest_open_loss_by_dephasing}")
+    print(f"best_detector_stability_by_dephasing = {summary.best_detector_stability_by_dephasing}")
+    print(f"preferred_mode_by_dephasing = {summary.preferred_mode_by_dephasing}")
+    print(f"detector_reversibility_corr_by_dephasing = {summary.detector_reversibility_corr_by_dephasing}")
+    print(f"detector_loss_corr_by_dephasing = {summary.detector_loss_corr_by_dephasing}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This synthetic ensemble tests whether operating modes with higher "
+        "reversibility_score remain more robust under sampled wafer disorder and dephasing. "
+        "It is synthetic validation of instrumental reversibility metadata, not experimental "
+        "validation or a claim about time reversal."
+    )
+    return 0
+
+
+def run_objective_mode_comparison_mode(config: dict[str, Any]) -> int:
+    runtime = execute_objective_mode_comparison(config)
+    samples = runtime.samples
+    summary = runtime.summary
+    block = dict(config["objective_mode_comparison"])
+    bootstrap_block = dict(block["bootstrap"])
+    bootstrap_ci = {
+        "detector_delta": bootstrap_delta_ci(
+            np.array([sample.detector_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]),
+        ),
+        "noise_action_delta": bootstrap_delta_ci(
+            np.array([sample.noise_action_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 1,
+        ),
+        "leakage_delta": bootstrap_delta_ci(
+            np.array([sample.leakage_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 2,
+        ),
+        "control_cost_delta": bootstrap_delta_ci(
+            np.array([sample.control_cost_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 3,
+        ),
+        "raw_metric_delta": bootstrap_delta_ci(
+            np.array([sample.raw_metric_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 4,
+        ),
+        "normalized_metric_delta": bootstrap_delta_ci(
+            np.array([sample.normalized_metric_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 5,
+        ),
+        "common_balanced_delta": bootstrap_delta_ci(
+            np.array([sample.common_balanced_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 6,
+        ),
+        "objective_delta": bootstrap_delta_ci(
+            np.array([sample.objective_delta for sample in samples], dtype=np.float64),
+            n_bootstrap=int(bootstrap_block["n_bootstrap"]),
+            ci=float(bootstrap_block["ci"]),
+            seed=int(bootstrap_block["seed"]) + 7,
+        ),
+    }
+    scale_sensitivity = run_scale_sensitivity(config, runtime)
+    uniform_scale_sensitivity = scale_sensitivity["uniform_scale_sensitivity"]
+    componentwise_scale_sensitivity = scale_sensitivity["componentwise_scale_sensitivity"]
+    csv_path = write_comparison_csv(block["outputs"]["csv_path"], samples)
+    summary_path = write_comparison_summary_json(
+        block["outputs"]["summary_path"],
+        summary,
+        bootstrap_ci=bootstrap_ci,
+        uniform_scale_sensitivity=uniform_scale_sensitivity,
+        componentwise_scale_sensitivity=componentwise_scale_sensitivity,
+    )
+    plot_path = plot_objective_mode_comparison(samples, block["outputs"]["plot_path"])
+
+    print("Objective Mode Comparison")
+    print(f"n_samples = {summary.n_samples}")
+    print("Primary paired deltas:")
+    print(f"detector_win_rate = {summary.detector_win_rate:.6f}")
+    print(f"mean_detector_delta = {summary.mean_detector_delta:.6f}")
+    print(
+        "bootstrap_detector_delta_95ci = "
+        f"({bootstrap_ci['detector_delta'][0]:.6f}, {bootstrap_ci['detector_delta'][1]:.6f})"
+    )
+    print(f"noise_action_win_rate = {summary.noise_action_win_rate:.6f}")
+    print(f"mean_noise_action_delta = {summary.mean_noise_action_delta:.6f}")
+    print(
+        "bootstrap_noise_action_delta_95ci = "
+        f"({bootstrap_ci['noise_action_delta'][0]:.6f}, {bootstrap_ci['noise_action_delta'][1]:.6f})"
+    )
+    print(f"leakage_win_rate = {summary.leakage_win_rate:.6f}")
+    print(f"mean_leakage_delta = {summary.mean_leakage_delta:.6f}")
+    print(
+        "bootstrap_leakage_delta_95ci = "
+        f"({bootstrap_ci['leakage_delta'][0]:.6f}, {bootstrap_ci['leakage_delta'][1]:.6f})"
+    )
+    print(f"control_cost_win_rate = {summary.control_cost_win_rate:.6f}")
+    print(f"mean_control_cost_delta = {summary.mean_control_cost_delta:.6f}")
+    print(
+        "bootstrap_control_cost_delta_95ci = "
+        f"({bootstrap_ci['control_cost_delta'][0]:.6f}, {bootstrap_ci['control_cost_delta'][1]:.6f})"
+    )
+    print("Cross-mode score audit:")
+    print(f"raw_metric_win_rate = {summary.raw_metric_win_rate:.6f}")
+    print(f"mean_raw_metric_delta = {summary.mean_raw_metric_delta:.6f}")
+    print(
+        "bootstrap_raw_metric_delta_95ci = "
+        f"({bootstrap_ci['raw_metric_delta'][0]:.6f}, {bootstrap_ci['raw_metric_delta'][1]:.6f})"
+    )
+    print(f"normalized_metric_win_rate = {summary.normalized_metric_win_rate:.6f}")
+    print(f"mean_normalized_metric_delta = {summary.mean_normalized_metric_delta:.6f}")
+    print(
+        "bootstrap_normalized_metric_delta_95ci = "
+        f"({bootstrap_ci['normalized_metric_delta'][0]:.6f}, {bootstrap_ci['normalized_metric_delta'][1]:.6f})"
+    )
+    print(f"common_balanced_win_rate = {summary.common_balanced_win_rate:.6f}")
+    print(f"mean_common_balanced_delta = {summary.mean_common_balanced_delta:.6f}")
+    print(
+        "bootstrap_common_balanced_delta_95ci = "
+        f"({bootstrap_ci['common_balanced_delta'][0]:.6f}, {bootstrap_ci['common_balanced_delta'][1]:.6f})"
+    )
+    print(f"direct_objective_delta_status = {summary.direct_objective_delta_status}")
+    print("Sensitivity:")
+    print(f"uniform_scale_sensitivity = {uniform_scale_sensitivity}")
+    print(f"componentwise_scale_sensitivity = {componentwise_scale_sensitivity}")
+    print("Interpretation:")
+    print(f"normalized_detector_tradeoff = {summary.mean_detector_delta < 0.0}")
+    print(f"normalized_noise_benefit = {summary.mean_noise_action_delta > 0.0}")
+    print(f"normalized_leakage_benefit = {summary.mean_leakage_delta > 0.0}")
+    print(f"common_score_result = {'normalized_advantage' if summary.mean_common_balanced_delta > 0.0 else 'raw_advantage'}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This paired synthetic ensemble compares raw and normalized objective modes "
+        "on identical disorder/noise samples, testing whether normalized mode improves multi-objective "
+        "balance beyond a single smoke-run. It is synthetic validation, not experimental validation."
+    )
+    return 0
+
+
+def run_time_resolution_audit_mode(config: dict[str, Any]) -> int:
+    runs, summary = run_time_resolution_audit(config)
+    block = dict(config["time_resolution_audit"])
+    csv_path = write_time_resolution_csv(block["outputs"]["csv_path"], runs)
+    summary_path = write_time_resolution_summary_json(block["outputs"]["summary_path"], summary)
+    plot_path = plot_time_resolution_audit(runs, block["outputs"]["plot_path"])
+
+    print("Time-Resolution Sensitivity Audit")
+    print(f"time_step_multipliers = {[float(run.time_step_multiplier) for run in runs]}")
+    print(f"baseline_multiplier = {summary.baseline_multiplier}")
+    print(f"runs = {[asdict(run) for run in runs]}")
+    print(f"common_balanced_relative_change_max = {summary.common_balanced_relative_change_max:.6f}")
+    print(f"detector_delta_absolute_change_max = {summary.detector_delta_absolute_change_max:.6f}")
+    print(f"noise_action_delta_absolute_change_max = {summary.noise_action_delta_absolute_change_max:.6f}")
+    print(f"leakage_delta_absolute_change_max = {summary.leakage_delta_absolute_change_max:.6f}")
+    print(f"sign_stable_common_balanced = {summary.sign_stable_common_balanced}")
+    print(f"sign_stable_detector_delta = {summary.sign_stable_detector_delta}")
+    print(f"sign_stable_noise_action_delta = {summary.sign_stable_noise_action_delta}")
+    print(f"sign_stable_leakage_delta = {summary.sign_stable_leakage_delta}")
+    print(f"time_resolution_sensitive = {summary.time_resolution_sensitive}")
+    print(f"registry_recommendation = {summary.registry_recommendation}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This audit treats time only as a numerical time-resolution parameter "
+        "in the Hamiltonian transport evaluation. It tests robustness of objective-mode comparison "
+        "metrics under finer and coarser time grids. It does not make claims about the fundamental nature of time."
+    )
+    return 0
+
+
+def run_reversibility_audit_mode(config: dict[str, Any]) -> int:
+    coherent_results, open_results, summary = run_reversibility_audit(config)
+    block = dict(config["reversibility_audit"])
+    csv_path = write_reversibility_csv(block["outputs"]["csv_path"], coherent_results, open_results)
+    summary_path = write_reversibility_summary_json(block["outputs"]["summary_path"], summary)
+    plot_path = plot_reversibility_audit(coherent_results, open_results, block["outputs"]["plot_path"])
+
+    print("Reversibility Audit")
+    print(f"operating_modes = {sorted({result.mode_name for result in coherent_results})}")
+    print(f"time_step_multipliers = {sorted({float(result.time_step_multiplier) for result in coherent_results})}")
+    print(f"dephasing_strengths = {sorted({float(result.dephasing_strength) for result in open_results})}")
+    print(f"coherent_all_passed = {summary.coherent_all_passed}")
+    print(f"min_coherent_fidelity = {summary.min_coherent_fidelity:.6f}")
+    print(f"max_coherent_l2_error = {summary.max_coherent_l2_error:.6e}")
+    print(f"max_coherent_loss_delta = {summary.max_coherent_loss_delta:.6e}")
+    print(f"max_open_loss_delta = {summary.max_open_loss_delta:.6f}")
+    print(f"time_resolution_sensitive = {summary.time_resolution_sensitive}")
+    print(f"recommended_registry_action = {summary.recommended_registry_action}")
+    print(f"csv_path = {csv_path}")
+    print(f"summary_path = {summary_path}")
+    print(f"plot_path = {plot_path}")
+    print(
+        "interpretation = This audit treats “time reversal” only as instrumental reversibility: "
+        "applying U(-t) after U(t) and measuring state recovery. It tests numerical reversibility "
+        "and dephasing-induced irreversibility without making claims about the fundamental nature of time."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transition Grid Atlas research instrument")
     parser.add_argument(
@@ -658,13 +1692,183 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("hunter", help="Run recursive search for diffusive candidates")
     subparsers.add_parser("audit", help="Audit ledger evidence under strict modern thresholds")
     subparsers.add_parser("inverse", help="Run inverse transition symmetry analysis")
+    hardware_parser = subparsers.add_parser("hardware-map", help="Map a photonic wafer config into effective KTA W and gamma parameters")
+    hardware_parser.add_argument(
+        "--config",
+        dest="hardware_config",
+        default=None,
+        help="Optional hardware-specific YAML path; accepted after the subcommand for operator convenience",
+    )
+    hardware_parser.add_argument(
+        "--emit-lab-config",
+        action="store_true",
+        help="Emit an executable KTA lab override config from the hardware mapping",
+    )
+    hardware_parser.add_argument(
+        "--out-config",
+        default=None,
+        help="Optional output path for the generated lab override config",
+    )
+    transition_tune_parser = subparsers.add_parser(
+        "transition-tune",
+        help="Search fixed-grid transition controls for hardware-native error suppression",
+    )
+    transition_tune_parser.add_argument(
+        "--config",
+        dest="transition_tune_config",
+        default=None,
+        help="Optional transition-tuner YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_parser = subparsers.add_parser(
+        "transition-motor",
+        help="Run the instrumented transition motor control stack",
+    )
+    transition_motor_parser.add_argument(
+        "--config",
+        dest="transition_motor_config",
+        default=None,
+        help="Optional transition-motor YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_parser.add_argument(
+        "--report-sensitivity",
+        action="store_true",
+        help="Write a sensitivity atlas CSV for the transition motor operating point",
+    )
+    transition_motor_parser.add_argument(
+        "--objective-mode",
+        "--operating-mode",
+        dest="transition_motor_operating_mode",
+        default=None,
+        help="Optional objective mode name from the transition-motor registry",
+    )
+    transition_motor_audit_parser = subparsers.add_parser(
+        "transition-motor-audit",
+        help="Audit transition motor bound pressure, ablations, limits and seed stability",
+    )
+    transition_motor_audit_parser.add_argument(
+        "--config",
+        dest="transition_motor_audit_config",
+        default=None,
+        help="Optional transition-motor YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_ensemble_parser = subparsers.add_parser(
+        "transition-motor-ensemble",
+        help="Run a synthetic ensemble validation for the transition motor",
+    )
+    transition_motor_ensemble_parser.add_argument(
+        "--config",
+        dest="transition_motor_ensemble_config",
+        default=None,
+        help="Optional transition-motor ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_ensemble_stats_parser = subparsers.add_parser(
+        "transition-motor-ensemble-stats",
+        help="Compute statistical audit outputs for a transition-motor ensemble CSV",
+    )
+    transition_motor_ensemble_stats_parser.add_argument("--csv", required=True, help="Input ensemble CSV path")
+    transition_motor_ensemble_stats_parser.add_argument("--out-json", required=True, help="Output statistics JSON path")
+    transition_motor_ensemble_stats_parser.add_argument("--out-plot", required=True, help="Output statistics plot path")
+    transition_motor_pareto_parser = subparsers.add_parser(
+        "transition-motor-pareto",
+        help="Run an objective-weight Pareto sweep for the transition motor",
+    )
+    transition_motor_pareto_parser.add_argument(
+        "--config",
+        dest="transition_motor_pareto_config",
+        default=None,
+        help="Optional transition-motor Pareto YAML path; accepted after the subcommand for operator convenience",
+    )
+    transition_motor_pareto_audit_parser = subparsers.add_parser(
+        "transition-motor-pareto-audit",
+        help="Run a stress audit over Pareto weight presets for the transition motor",
+    )
+    transition_motor_pareto_audit_parser.add_argument(
+        "--config",
+        dest="transition_motor_pareto_audit_config",
+        default=None,
+        help="Optional transition-motor Pareto-audit YAML path; accepted after the subcommand for operator convenience",
+    )
+    objective_mode_comparison_parser = subparsers.add_parser(
+        "objective-mode-comparison",
+        help="Run a paired synthetic comparison between raw and normalized objective modes",
+    )
+    objective_mode_comparison_parser.add_argument(
+        "--config",
+        dest="objective_mode_comparison_config",
+        default=None,
+        help="Optional objective-mode comparison YAML path; accepted after the subcommand for operator convenience",
+    )
+    reversibility_audit_parser = subparsers.add_parser(
+        "reversibility-audit",
+        help="Audit instrumental reversibility for transition-motor operating modes",
+    )
+    reversibility_audit_parser.add_argument(
+        "--config",
+        dest="reversibility_audit_config",
+        default=None,
+        help="Optional reversibility-audit YAML path; accepted after the subcommand for operator convenience",
+    )
+    reversibility_ensemble_parser = subparsers.add_parser(
+        "reversibility-ensemble",
+        help="Run synthetic ensemble validation for reversibility-aware operating modes",
+    )
+    reversibility_ensemble_parser.add_argument(
+        "--config",
+        dest="reversibility_ensemble_config",
+        default=None,
+        help="Optional reversibility-ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
+    time_resolution_audit_parser = subparsers.add_parser(
+        "time-resolution-audit",
+        help="Audit objective-mode comparison sensitivity to Hamiltonian time-grid resolution",
+    )
+    time_resolution_audit_parser.add_argument(
+        "--config",
+        dest="time_resolution_audit_config",
+        default=None,
+        help="Optional time-resolution audit YAML path; accepted after the subcommand for operator convenience",
+    )
+    wafer_ensemble_parser = subparsers.add_parser(
+        "wafer-ensemble",
+        help="Run a synthetic wafer ensemble study over fabrication disorder and phase noise",
+    )
+    wafer_ensemble_parser.add_argument(
+        "--config",
+        dest="wafer_ensemble_config",
+        default=None,
+        help="Optional wafer-ensemble YAML path; accepted after the subcommand for operator convenience",
+    )
+    lab_parser = subparsers.add_parser("lab", help="Run the Experimental Quantum & RTT Lab and save a trajectory artifact")
+    lab_parser.add_argument("--mode", choices=["qm_free", "standard_qm", "anderson", "lindblad", "rtt"], default=None)
+    lab_parser.add_argument("--gamma", type=float, default=None, help="Override lab gamma for this run")
+    lab_parser.add_argument("--render", action="store_true", help="Render an animation artifact after the lab run")
+
+    animate_parser = subparsers.add_parser("animate", help="Render a GIF or MP4 from a saved lab trajectory artifact")
+    animate_parser.add_argument("--trajectory", required=True, help="Path to a saved .npz trajectory artifact")
+    animate_parser.add_argument("--out", required=True, help="Output GIF or MP4 path")
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    config = load_config(Path(args.config))
+    config_path = Path(
+        getattr(args, "hardware_config", None)
+        or getattr(args, "transition_tune_config", None)
+        or getattr(args, "transition_motor_config", None)
+        or getattr(args, "transition_motor_audit_config", None)
+        or getattr(args, "transition_motor_ensemble_config", None)
+        or getattr(args, "transition_motor_pareto_config", None)
+        or getattr(args, "transition_motor_pareto_audit_config", None)
+        or getattr(args, "objective_mode_comparison_config", None)
+        or getattr(args, "reversibility_audit_config", None)
+        or getattr(args, "reversibility_ensemble_config", None)
+        or getattr(args, "time_resolution_audit_config", None)
+        or getattr(args, "wafer_ensemble_config", None)
+        or args.config
+    )
+    config = load_config(config_path)
+    config["__config_path__"] = str(config_path)
     ensure_output_dirs()
 
     if args.command == "single":
@@ -679,6 +1883,48 @@ def main() -> int:
         return run_audit_mode(config)
     if args.command == "inverse":
         return run_inverse_mode(config)
+    if args.command == "hardware-map":
+        return run_hardware_map_mode(
+            config,
+            emit_lab_config=args.emit_lab_config,
+            out_config=args.out_config,
+        )
+    if args.command == "transition-tune":
+        return run_transition_tune_mode(config)
+    if args.command == "transition-motor":
+        return run_transition_motor_mode(
+            config,
+            report_sensitivity=args.report_sensitivity,
+            operating_mode=getattr(args, "transition_motor_operating_mode", None),
+        )
+    if args.command == "transition-motor-audit":
+        return run_transition_motor_audit_mode(config)
+    if args.command == "transition-motor-ensemble":
+        return run_transition_motor_ensemble_mode(config)
+    if args.command == "transition-motor-ensemble-stats":
+        return run_transition_motor_ensemble_stats_mode(
+            csv_path=args.csv,
+            out_json=args.out_json,
+            out_plot=args.out_plot,
+        )
+    if args.command == "transition-motor-pareto":
+        return run_transition_motor_pareto_mode(config)
+    if args.command == "transition-motor-pareto-audit":
+        return run_transition_motor_pareto_audit_mode(config_path)
+    if args.command == "objective-mode-comparison":
+        return run_objective_mode_comparison_mode(config)
+    if args.command == "reversibility-audit":
+        return run_reversibility_audit_mode(config)
+    if args.command == "reversibility-ensemble":
+        return run_reversibility_ensemble_mode(config)
+    if args.command == "time-resolution-audit":
+        return run_time_resolution_audit_mode(config)
+    if args.command == "wafer-ensemble":
+        return run_wafer_ensemble_mode(config)
+    if args.command == "lab":
+        return run_lab_mode(config, mode=args.mode, gamma=args.gamma, render=args.render)
+    if args.command == "animate":
+        return run_animate_mode(trajectory=args.trajectory, output_path=args.out)
     parser.error(f"unknown command: {args.command}")
     return 2
 

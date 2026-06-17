@@ -1,0 +1,70 @@
+reversibility_score:
+  name: R_BMW_TPT
+  range: 0.0_to_1.0
+  interpretation:
+    1.0: near_clean_transition
+    0.0: noisy_irreversible_transition
+  formula:
+    R: W_phase * W_stability * W_heat * W_pressure * W_residual * W_friction
+  components:
+    W_phase:
+      metric: abs(CA50 - CA50_target)
+      clean: low_error
+      reject: CA50 achieved through excessive spark advance or knock correction
+    W_stability:
+      metrics:
+        - sigma_CA50
+        - COV_IMEP
+        - cycle_to_cycle_pmax_variance
+      clean: low_dispersion
+      reject: shorter burn with higher cyclic variance
+    W_heat:
+      metrics:
+        - exhaust_enthalpy_residue
+        - coolant_heat_rejection_estimate
+        - late_burn_fraction_CA90_tail
+      clean: lower_exergy_destruction
+      reject: fast pressure rise that becomes wall heat
+    W_pressure:
+      metrics:
+        - theta_pmax
+        - PRR_max
+        - knock_intensity
+      clean: pmax_after_TDC_inside_safe_window
+      reject: pressure peak too early, knock-limited, or NVH-noisy
+    W_residual:
+      metrics:
+        - trapped_residual_fraction
+        - lambda_dispersion
+        - misfire_probability
+      clean: useful_internal_EGR_without_phase_scatter
+      reject: dilution that increases ignition-delay variance
+    W_friction:
+      metrics:
+        - pumping_work
+        - throttle_loss
+        - turbo_backpressure_penalty
+      clean: Valvetronic_load_control_with_low_pumping_loss
+      reject: boost/backpressure used to compensate poor phase control
+
+accept_transition_if:
+  - R_BMW_TPT >= 0.86
+  - CA10_90 decreases_or_constant
+  - sigma_CA50 decreases
+  - COV_IMEP decreases
+  - knock_correction_events == minimal
+  - PRR_max within_safe_calibration_boundary
+  - net_indicated_efficiency increases
+  - heat_rejection_per_indicated_work decreases
+
+reject_transition_if:
+  - power_gain_is_primary_residue
+  - burn_duration_shortens_but_noise_increases
+  - CA50_target_is_forced_outside_knock_margin
+  - fuel_enrichment_masks_phase_noise
+  - boost_masks_poor_mixture_preparation
+  - late_combustion_tail_increases
+
+# Spark timing is a dominante ingang voor verbrandingsfasecontrole, en CA50,
+# maximale cilinderdrukfase, IMEP en heat-release-rate worden in onderzoek
+# gebruikt als feedbackindicatoren voor verbrandingskwaliteit.
